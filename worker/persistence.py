@@ -25,7 +25,7 @@ logger = log.setup_logger("persistence")
 
 # SQLite 单连接 + 锁
 _db_conn = None
-_db_lock = threading.Lock()
+_db_lock = threading.RLock()  # RLock 支持重入，避免 _get_db() 在 db_execute/db_query 内部死锁
 
 
 def _get_db():
