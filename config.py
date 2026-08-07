@@ -98,6 +98,12 @@ DISK_WARN_PERCENT = int(os.environ.get("DISK_WARN_PERCENT", "85"))
 DISK_CLEAN_TRIGGER_PERCENT = int(os.environ.get("DISK_CLEAN_TRIGGER_PERCENT", "90"))
 DISK_CHECK_INTERVAL = int(os.environ.get("DISK_CHECK_INTERVAL", "600"))
 
+# ==================== MCP 服务 ====================
+MCP_PORT = int(os.environ.get("MCP_PORT", "3457"))
+MCP_PREFIX = os.environ.get("MCP_PREFIX", "mcp")
+MCP_DEPS_ASSET = "mcp-deps.tar.gz.enc"
+
+
 
 class InstanceConfig:
     """

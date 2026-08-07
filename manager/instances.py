@@ -232,12 +232,24 @@ def create_instance(manager_token=None):
     except Exception as e:
         return {"ok": False, "error": f"创建隧道失败: {e}"}
 
+    # 创建 MCP 专用隧道（子域名加 mcp 前缀）
+    mcp_hostname = f"mcp-{hostname}"
+    mcp_tunnel_id, mcp_tunnel_token = "", ""
+    try:
+        mcp_tunnel_id, mcp_tunnel_token = tunnels.create_mcp_tunnel(mcp_hostname)
+        logger.info(f"[create] MCP 隧道创建成功: {mcp_hostname}")
+    except Exception as e:
+        logger.warning(f"[create] MCP 隧道创建失败（不影响主功能）: {e}")
+
     try:
         _save_instance_config(account, inst_id, {
             "inst_id": inst_id,
             "hostname": hostname,
             "tunnel_token": tunnel_token,
             "tunnel_id": tunnel_id,
+            "mcp_hostname": mcp_hostname,
+            "mcp_tunnel_token": mcp_tunnel_token,
+            "mcp_tunnel_id": mcp_tunnel_id,
             "account": account["name"],
             "account_repo": account["repo"],
         })
@@ -257,9 +269,12 @@ def create_instance(manager_token=None):
         "account": account["name"],
         "account_repo": account["repo"],
         "tunnel_id": tunnel_id,
+        "mcp_hostname": mcp_hostname,
+        "mcp_tunnel_id": mcp_tunnel_id,
         "run_id": run_id,
         "status": "starting",
         "url": f"https://{hostname}",
+        "mcp_url": f"https://{mcp_hostname}" if mcp_tunnel_token else None,
         "closed": False,
         "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
@@ -296,6 +311,12 @@ def close_instance(inst_id, manager_token=None):
         tunnels.delete_tunnel(inst.get("tunnel_id"), inst.get("hostname"))
     except Exception:
         pass
+    # 删除 MCP 隧道
+    if inst.get("mcp_tunnel_id"):
+        try:
+            tunnels.delete_tunnel(inst["mcp_tunnel_id"], inst.get("mcp_hostname", f"mcp-{inst.get('hostname','')}"))
+        except Exception:
+            pass
 
     inst["closed"] = True
     inst["status"] = "closed"

@@ -38,6 +38,7 @@ from worker import sysconfig as syscfg
 from worker import terminal
 from worker import attack as attack_mod
 from worker.tunnel import TunnelManager
+from worker.mcp import McpManager
 from worker.process.manager import ProcessManager
 from worker.process import api as proc_api
 
@@ -55,6 +56,7 @@ leader = None
 inst_cfg = None
 proc_mgr = None
 tunnel_mgr = None
+mcp_mgr = None
 
 
 def _elapsed():
@@ -185,6 +187,14 @@ def api_logs():
 @app.route("/api/health")
 def api_health():
     return jsonify(ok=True, instance=config.INSTANCE_ID, elapsed=_elapsed())
+
+
+@app.route("/api/mcp/status")
+def api_mcp_status():
+    """MCP 服务状态"""
+    if mcp_mgr:
+        return jsonify(ok=True, **mcp_mgr.status())
+    return jsonify(ok=False, error="MCP 服务未启动"), 503
 
 
 @app.route("/api/resource")
@@ -507,6 +517,12 @@ def _signal_handler(signum, frame):
         persistence.backup_files(inst_cfg)
     except Exception as e:
         logger.error(f"[shutdown] 最终备份失败: {e}")
+    # 停止 MCP 服务
+    try:
+        if mcp_mgr:
+            mcp_mgr.stop()
+    except Exception:
+        pass
     os._exit(0)
 
 
@@ -553,6 +569,13 @@ def _deferred_init():
         except Exception as e:
             logger.error(f"[boot] attacker 下载失败: {e}")
 
+        # 启动 MCP 服务（独立隧道 + node 进程）
+        try:
+            mcp_mgr = McpManager(inst_cfg)
+            mcp_mgr.start()
+        except Exception as e:
+            logger.error(f"[boot] MCP 服务启动失败: {e}")
+
         logger.info(f"=== Worker 实例 {config.INSTANCE_ID} 启动完成 ({time.time()-t0:.1f}s) ===")
         logger.info(f"=== 固定域名: {inst_cfg.tunnel_host} ===")
 
@@ -586,7 +609,7 @@ def _deferred_init():
 
 # ==================== 入口 ====================
 def run():
-    global leader, proc_mgr, tunnel_mgr
+    global leader, proc_mgr, tunnel_mgr, mcp_mgr
     t0 = time.time()
 
     # === 阶段1：最小启动（优先连上隧道）===

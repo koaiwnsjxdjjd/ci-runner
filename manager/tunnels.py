@@ -86,3 +86,7 @@ def delete_tunnel(tunnel_id, hostname):
             f"https://api.cloudflare.com/client/v4/accounts/{config.CF_ACCOUNT_ID}/cfd_tunnel/{tunnel_id}")
     logger.info(f"[tunnel] 隧道已删除: {hostname}")
     return {"ok": True}
+
+def create_mcp_tunnel(hostname):
+    """创建 MCP 专用隧道（服务指向 3457 端口）"""
+    return create_tunnel(hostname, service_url="http://localhost:3457")
