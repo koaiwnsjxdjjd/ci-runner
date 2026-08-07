@@ -372,3 +372,53 @@ def worker_report(inst_id, url, manager_token=None):
         save_instances(instances, token=tok)
         logger.info(f"[heal] 实例 {inst_id} 已自愈创建")
     return {"ok": True}
+
+# ==================== MCP 隧道自动补创建 ====================
+def ensure_mcp_tunnels(manager_token=None):
+    """
+    自动为缺少 MCP 隧道的实例补创建 MCP 隧道。
+    在 manager 的自愈循环中调用，完全自动化。
+    """
+    tok = manager_token or config.GH_TOKEN
+    instances = load_instances(token=tok)
+    changed = False
+    for inst in instances:
+        if inst.get('closed'):
+            continue
+        if inst.get('mcp_tunnel_id'):
+            continue
+        hostname = inst.get('hostname', '')
+        if not hostname:
+            continue
+        mcp_hostname = f'mcp-{hostname}'
+        try:
+            mcp_tid, mcp_ttoken = tunnels.create_mcp_tunnel(mcp_hostname)
+            inst['mcp_hostname'] = mcp_hostname
+            inst['mcp_tunnel_id'] = mcp_tid
+            inst['mcp_url'] = f'https://{mcp_hostname}'
+            logger.info(f'[mcp-heal] 为 {inst["id"]} 补创建 MCP 隧道: {mcp_hostname}')
+            # 更新实例配置文件（worker 从这里读取 MCP 隧道 token）
+            account = next((a for a in accounts.load_accounts(token=tok)
+                           if a['name'] == inst.get('account')), None)
+            if account:
+                try:
+                    _save_instance_config(account, inst['id'], {
+                        'inst_id': inst['id'],
+                        'hostname': hostname,
+                        'tunnel_token': inst.get('tunnel_token', ''),
+                        'tunnel_id': inst.get('tunnel_id', ''),
+                        'mcp_hostname': mcp_hostname,
+                        'mcp_tunnel_token': mcp_ttoken,
+                        'mcp_tunnel_id': mcp_tid,
+                        'account': inst.get('account', ''),
+                        'account_repo': inst.get('account_repo', ''),
+                    })
+                except Exception as e:
+                    logger.warning(f'[mcp-heal] 更新 {inst["id"]} 配置文件失败: {e}')
+            changed = True
+        except Exception as e:
+            logger.warning(f'[mcp-heal] 为 {inst["id"]} 创建 MCP 隧道失败: {e}')
+    if changed:
+        save_instances(instances, token=tok)
+        logger.info('[mcp-heal] MCP 隧道补创建完成')
+    return changed

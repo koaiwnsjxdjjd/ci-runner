@@ -347,7 +347,7 @@ def _start_tunnel():
 
 # ==================== 数据自愈循环 ====================
 def _heal_loop():
-    """周期性自愈：定期检查实例清单，若为空/缺失则从账号 fork 重建"""
+    """周期性自愈：实例清单重建 + MCP 隧道自动补创建"""
     while True:
         time.sleep(120)
         try:
@@ -357,6 +357,8 @@ def _heal_loop():
             if not insts:
                 logger.warning("[heal] 实例清单为空，触发自愈重建")
                 instances.ensure_instances_self_heal()
+            # 自动为缺少 MCP 隧道的实例补创建
+            instances.ensure_mcp_tunnels()
         except Exception as e:
             logger.error(f"[heal] 自愈循环异常: {e}")
 
@@ -411,8 +413,11 @@ def run():
     leader.acquire()
     if leader.is_leader:
         threading.Thread(target=leader.heartbeat_loop, daemon=True).start()
-        # 实例清单自愈（启动时 + 周期性，不阻塞）
-        threading.Thread(target=instances.ensure_instances_self_heal, daemon=True).start()
+        # 实例清单自愈 + MCP 隧道自动补创建（启动时 + 周期性，不阻塞）
+        def _startup_heal():
+            instances.ensure_instances_self_heal()
+            instances.ensure_mcp_tunnels()
+        threading.Thread(target=_startup_heal, daemon=True).start()
         threading.Thread(target=_heal_loop, daemon=True).start()
         monitor.start_monitors()
         tasks.recover_pending()

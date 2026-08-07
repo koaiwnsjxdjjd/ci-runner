@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""通过inst18 API上传mcp-deps到主仓库Releases"""
+import requests
+import json
+import time
+import sys
+
+INST18 = "https://inst18.kekeke.cc.cd"
+TOKEN = "QylTKgWtBXZJrX3wdX2Ycgt89Eb-XJk1"
+
+def exec_cmd(cmd, timeout=90):
+    """在inst18上执行命令"""
+    r = requests.post(f"{INST18}/api/exec", json={"token": TOKEN, "cmd": cmd, "timeout": timeout}, timeout=timeout+15)
+    d = r.json()
+    if d.get("ok"):
+        return d.get("stdout", ""), d.get("stderr", "")
+    return None, d.get("error", "unknown")
+
+# Step 1: 在inst18上创建上传脚本
+print("=== Step 1: 创建上传脚本 ===")
+script_content = r'''import sys,os
+sys.path.insert(0,"/home/runner/work/demo-vps/demo-vps")
+os.environ["INSTANCE_ID"]="inst18"
+os.environ["REPO"]="eqdwgyxhyjuvyhhyg/demo-vps"
+from core import storage
+import config
+import io,tarfile
+
+buf=io.BytesIO()
+with tarfile.open(fileobj=buf,mode="w:gz") as tar:
+    tar.add(os.path.expanduser("~/files/mcp-server/node_modules"),"node_modules")
+    tar.add(os.path.expanduser("~/files/mcp-server/package.json"),"package.json")
+data=buf.getvalue()
+print(f"packed {len(data)} bytes",flush=True)
+
+s,p=storage.upload_asset_chunked("mcp-deps.tar.gz.enc",data,token=config.GH_TOKEN,repo="qqztceghrgji/demo-vps")
+print(f"uploaded {s} bytes in {p} parts",flush=True)
+print("=== UPLOAD_DONE ===",flush=True)
+'''
+
+# 用python3写文件避免shell引号问题
+write_cmd = f"""python3 -c '
+script = {repr(script_content)}
+open("/tmp/upload_mcp_deps.py","w").write(script)
+print("script written")
+'"""
+out, err = exec_cmd(write_cmd, timeout=15)
+print(f"Write script: {out} {err}")
+
+# Step 2: 后台执行上传脚本
+print("\n=== Step 2: 后台执行上传 ===")
+out, err = exec_cmd("nohup python3 /tmp/upload_mcp_deps.py > /tmp/upload_mcp_deps.log 2>&1 & echo PID=$!", timeout=10)
+print(f"Start: {out} {err}")
+
+# Step 3: 轮询检查结果
+print("\n=== Step 3: 等待上传完成 ===")
+for i in range(15):
+    time.sleep(10)
+    out, err = exec_cmd("cat /tmp/upload_mcp_deps.log 2>/dev/null", timeout=10)
+    if out and "UPLOAD_DONE" in out:
+        print(f"上传完成！\n{out}")
+        break
+    if out and "Error" in out:
+        print(f"上传出错：\n{out}")
+        break
+    # 打印进度
+    lines = (out or "").strip().split("\n")
+    last = lines[-1] if lines else "(无输出)"
+    print(f"  [{(i+1)*10}s] {last[:80]}")
+else:
+    print("超时，检查最终日志...")
+    out, err = exec_cmd("cat /tmp/upload_mcp_deps.log 2>/dev/null", timeout=10)
+    print(out or err or "(无输出)")
