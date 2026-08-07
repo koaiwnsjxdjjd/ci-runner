@@ -108,6 +108,7 @@ def health_monitor_loop():
                         else:
                             _restart_instance(inst)
                             inst["status"] = "restarting"
+                            inst["last_seen"] = time.time()
                             logger.info(f"[monitor] 实例 {inst['id']} 已标记 restarting 并触发重启")
                         _fail_counts[inst["id"]] = 0
                         changed = True

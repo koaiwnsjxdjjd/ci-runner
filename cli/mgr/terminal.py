@@ -144,6 +144,17 @@ def connect_terminal(host):
                 pass
 
     def _connect():
+        # 先检查实例是否可用
+        try:
+            req = urllib.request.Request(url.rstrip("/") + "/api/health",
+                headers={"User-Agent": "Mozilla/5.0 (ghbox-cli)"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                if r.status != 200:
+                    raise ConnectionError(f"实例返回 {r.status}")
+        except urllib.error.HTTPError as e:
+            raise ConnectionError(f"实例返回 {e.code}")
+        except urllib.error.URLError as e:
+            raise ConnectionError(f"无法连接实例: {e.reason}")
         sio.connect(url, auth={"token": config.TOKEN, "session": session},
                     transports=["websocket"], wait_timeout=25)
 
