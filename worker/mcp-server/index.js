@@ -188,6 +188,19 @@ app.use((req, res, next) => {
   next();
 });
 
+// ============ Token 认证 ============
+const MCP_TOKEN = process.env.EXEC_TOKEN || "";
+const PUBLIC_PATHS = new Set(["/health", "/"]);
+
+app.use((req, res, next) => {
+  if (PUBLIC_PATHS.has(req.path)) return next();
+  const token = (req.headers["authorization"] || "").replace("Bearer ", "").trim()
+    || (req.query.token || "").trim()
+    || (req.body && req.body.token ? req.body.token : "");
+  if (!MCP_TOKEN || token === MCP_TOKEN) return next();
+  return res.status(401).json({ error: "未授权" });
+});
+
 // ============ 健康检查 ============
 app.get("/health", (req, res) => {
   res.json({

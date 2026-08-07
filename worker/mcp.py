@@ -172,7 +172,7 @@ class McpManager:
         env["MCP_FILES_DIR"] = MCP_FILES_DIR
         mcp_host = self._get_mcp_hostname()
         env["MCP_BASE_URL"] = f"https://{mcp_host}" if mcp_host else f"http://localhost:{MCP_PORT}"
-        # EXEC_TOKEN 不传给MCP服务（远程MCP服务不需要认证）
+        env["EXEC_TOKEN"] = config.EXEC_TOKEN
         env["HOME"] = os.path.expanduser("~")
 
         os.makedirs(MCP_FILES_DIR, exist_ok=True)
