@@ -2,3 +2,4 @@ __pycache__/
 fix_mcp_tunnels.py
 upload_mcp_deps.py
 upload_mcp_deps.py.backup.*
+restore_tunnels.py

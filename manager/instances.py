@@ -131,6 +131,7 @@ def ensure_instances_self_heal(manager_token=None):
             "account": cfg.get("account", ""),
             "account_repo": cfg.get("account_repo", ""),
             "tunnel_id": cfg.get("tunnel_id", ""),
+            "tunnel_token": cfg.get("tunnel_token", ""),
             "mcp_hostname": mcp_hostname,
             "mcp_tunnel_id": cfg.get("mcp_tunnel_id", ""),
             "mcp_url": f"https://{mcp_hostname}" if cfg.get("mcp_tunnel_id") else None,
@@ -456,20 +457,14 @@ def ensure_mcp_tunnels(manager_token=None):
         inst['mcp_url'] = f'https://{mcp_hostname}'
         logger.info(f'[mcp-heal] 为 {inst["id"]} 创建 MCP 隧道: {mcp_hostname}')
 
-        # 保存到配置文件
+        # 保存到配置文件（先读取现有配置，只更新MCP字段，不覆盖tunnel_token等）
         if account:
             try:
-                _save_instance_config(account, inst['id'], {
-                    'inst_id': inst['id'],
-                    'hostname': hostname,
-                    'tunnel_token': inst.get('tunnel_token', ''),
-                    'tunnel_id': inst.get('tunnel_id', ''),
-                    'mcp_hostname': mcp_hostname,
-                    'mcp_tunnel_token': mcp_ttoken,
-                    'mcp_tunnel_id': mcp_tid,
-                    'account': inst.get('account', ''),
-                    'account_repo': inst.get('account_repo', ''),
-                })
+                existing = _load_instance_config(account, inst['id']) or {}
+                existing['mcp_hostname'] = mcp_hostname
+                existing['mcp_tunnel_token'] = mcp_ttoken
+                existing['mcp_tunnel_id'] = mcp_tid
+                _save_instance_config(account, inst['id'], existing)
             except Exception as e:
                 logger.warning(f'[mcp-heal] 保存 {inst["id"]} 配置失败: {e}')
         changed = True
