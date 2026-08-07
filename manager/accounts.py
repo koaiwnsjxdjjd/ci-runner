@@ -164,11 +164,15 @@ def _ensure_repo(account_token, repo_name):
     return None, False
 
 
-def _wait_workflow_ready(account_token, repo, workflow="worker.yml", timeout=120):
-    """等待 workflow 被注册；超时推送空 commit 触发扫描"""
+def _wait_workflow_ready(account_token, repo, workflow="worker.yml", timeout=120, max_push=3):
+    """等待 workflow 被注册；超时推送空 commit 触发扫描（限制推送次数，防死循环）"""
     url = f"{ghapi.API_BASE}/repos/{repo}/actions/workflows"
     deadline = time.time() + timeout
-    while time.time() < deadline:
+    push_attempts = 0
+    while True:
+        # 超过 deadline 且推送次数用尽：退出（不再无限重置超时）
+        if time.time() > deadline and push_attempts >= max_push:
+            break
         try:
             status, d = ghapi.gh_request("GET", url, token=account_token)
             if status == 200:
@@ -177,7 +181,8 @@ def _wait_workflow_ready(account_token, repo, workflow="worker.yml", timeout=120
                     return True
         except Exception:
             pass
-        if time.time() > deadline - 60:
+        # 超时前 60s 推送空 commit 触发扫描（最多 max_push 次）
+        if time.time() > deadline - 60 and push_attempts < max_push:
             try:
                 rd = ghapi.gh_request("GET",
                                      f"{ghapi.API_BASE}/repos/{repo}/contents/README.md",
@@ -195,6 +200,7 @@ def _wait_workflow_ready(account_token, repo, workflow="worker.yml", timeout=120
                     logger.info("[repo] 已推送空 commit 触发 workflow 扫描")
             except Exception:
                 pass
+            push_attempts += 1
             deadline = time.time() + timeout
         time.sleep(5)
     return False
