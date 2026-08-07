@@ -103,10 +103,14 @@ def find_tunnel_by_name(name):
     return None
 
 
-def delete_tunnel_by_name(name):
-    """按名称删除隧道（含DNS记录）"""
-    t = find_tunnel_by_name(name)
+def delete_tunnel_by_name(hostname):
+    """按 hostname 删除隧道（含DNS记录）。
+    隧道名称格式: t-{hostname第一段}（如 t-mcp-inst12）
+    """
+    tunnel_name = "t-" + hostname.split(".")[0]
+    t = find_tunnel_by_name(tunnel_name)
     if not t:
+        logger.warning(f"[tunnel] 未找到隧道: {tunnel_name}")
         return
     tid = t.get("id")
     if not tid:
@@ -114,7 +118,7 @@ def delete_tunnel_by_name(name):
     # 删除 DNS 记录
     if config.CF_ZONE_ID:
         status, d = cf_request("GET",
-            f"https://api.cloudflare.com/client/v4/zones/{config.CF_ZONE_ID}/dns_records?name={name}")
+            f"https://api.cloudflare.com/client/v4/zones/{config.CF_ZONE_ID}/dns_records?name={hostname}")
         if status == 200:
             for rec in d.get("result", []):
                 cf_request("DELETE",
