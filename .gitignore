@@ -3,3 +3,6 @@ fix_mcp_tunnels.py
 upload_mcp_deps.py
 upload_mcp_deps.py.backup.*
 restore_tunnels.py
+fix_inst12.py
+rebuild_inst12.py
+fix_instances.py

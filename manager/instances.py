@@ -132,6 +132,7 @@ def ensure_instances_self_heal(manager_token=None):
             "account_repo": cfg.get("account_repo", ""),
             "tunnel_id": cfg.get("tunnel_id", ""),
             "tunnel_token": cfg.get("tunnel_token", ""),
+            "tunnel_token": cfg.get("tunnel_token", ""),
             "mcp_hostname": mcp_hostname,
             "mcp_tunnel_id": cfg.get("mcp_tunnel_id", ""),
             "mcp_url": f"https://{mcp_hostname}" if cfg.get("mcp_tunnel_id") else None,
