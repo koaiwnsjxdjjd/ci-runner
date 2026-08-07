@@ -61,11 +61,11 @@ def gh_request(method, url, token=None, data=None, headers=None, raw=False,
         try:
             # 关键：dict 用 json= 发送（GitHub API 需要 JSON body），bytes/str 用 data=
             if body is None:
-                resp = sess.request(method, url, headers=h, timeout=timeout)
+                resp = sess.request(method, url, headers=h, timeout=(10, timeout))
             elif isinstance(body, (bytes, str)):
-                resp = sess.request(method, url, data=body, headers=h, timeout=timeout)
+                resp = sess.request(method, url, data=body, headers=h, timeout=(10, timeout))
             else:
-                resp = sess.request(method, url, json=body, headers=h, timeout=timeout)
+                resp = sess.request(method, url, json=body, headers=h, timeout=(10, timeout))
             last_status = resp.status_code
             if raw:
                 last_body = resp.content

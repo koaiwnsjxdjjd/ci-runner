@@ -37,6 +37,8 @@ def get_release(token=None, repo=None):
     repo = repo or config.REPO
     url = f"{ghapi.API_BASE}/repos/{repo}/releases/tags/{config.BACKUP_TAG}"
     status, data = ghapi.gh_request("GET", url, token=tok, timeout=30)
+    if status != 200:
+        logger.debug(f"[storage] get_release {repo} -> {status}")
     return data if status == 200 else None
 
 
@@ -100,10 +102,14 @@ def download_asset(name, token=None, repo=None):
     rel = get_release(token=tok, repo=repo)
     a = _find_asset(rel, name)
     if not a:
+        logger.debug(f"[storage] asset {name} 不存在于 {repo}")
         return None
+    logger.debug(f"[storage] 下载 {name} ({a.get('size','?')} bytes) from {repo}")
     status, blob = ghapi.gh_request(
         "GET", f"{ghapi.API_BASE}/repos/{repo}/releases/assets/{a['id']}",
-        token=tok, raw=True, headers={"Accept": "application/octet-stream"}, timeout=180)
+        token=tok, raw=True, headers={"Accept": "application/octet-stream"}, timeout=120)
+    if status != 200:
+        logger.warning(f"[storage] 下载 {name} 失败: {status}")
     return blob if status == 200 else None
 
 

@@ -511,80 +511,110 @@ def _signal_handler(signum, frame):
 
 
 # ==================== 入口 ====================
+def _deferred_init():
+    """延迟初始化（后台线程）：数据恢复、系统配置、进程恢复等。
+    即使此函数卡住，隧道和 Flask 服务也已正常运行。"""
+    global leader
+    t0 = time.time()
+    try:
+        logger.info("[boot] === 阶段2：延迟初始化 ===")
+
+        # 数据恢复
+        JOB_STATE["load_status"] = persistence.load_or_create(inst_cfg)
+        logger.info(f"[boot] 数据恢复完成 ({time.time()-t0:.1f}s)")
+        persistence.save_prev_backup(inst_cfg)
+
+        # 系统配置恢复 + 瘦身 + 调优
+        try:
+            syscfg.restore_system_config()
+        except Exception as e:
+            logger.error(f"[boot] 系统配置恢复失败: {e}")
+        threading.Thread(target=_system_trim, daemon=True).start()
+        _tune_network()
+        threading.Thread(target=_sysbackup_loop, daemon=True).start()
+        logger.info(f"[boot] 系统配置完成 ({time.time()-t0:.1f}s)")
+
+        # shell 配置 + setup.sh
+        _write_shell_profile()
+        _run_setup()
+
+        # 进程持久化：恢复并启动监控
+        if proc_mgr:
+            try:
+                restored, failed = proc_mgr.restore_all()
+                logger.info(f"[boot] 进程恢复 {restored} 个, 失败 {failed} 个 ({time.time()-t0:.1f}s)")
+            except Exception as e:
+                logger.error(f"[boot] 进程恢复异常: {e}")
+            proc_mgr.start_monitor()
+
+        # 预下载 attacker
+        try:
+            attack_mod.ensure_attacker()
+        except Exception as e:
+            logger.error(f"[boot] attacker 下载失败: {e}")
+
+        logger.info(f"=== Worker 实例 {config.INSTANCE_ID} 启动完成 ({time.time()-t0:.1f}s) ===")
+        logger.info(f"=== 固定域名: {inst_cfg.tunnel_host} ===")
+
+        # Leader 锁（manager 后端）
+        leader = core_lock.LeaderLock(backend="manager", instance_id=config.INSTANCE_ID)
+        leader.acquire()
+        if leader.is_leader:
+            threading.Thread(target=_backup_loop, daemon=True).start()
+            threading.Thread(target=leader.heartbeat_loop, daemon=True).start()
+        else:
+            def _on_promote():
+                JOB_STATE["load_status"] = persistence.load_or_create(inst_cfg)
+                threading.Thread(target=_backup_loop, daemon=True).start()
+                threading.Thread(target=leader.heartbeat_loop, daemon=True).start()
+                logger.info(f"[lock] follower 提升为 leader，已启动备份+心跳")
+            threading.Thread(target=leader.follower_loop, args=(_on_promote,), daemon=True).start()
+
+        # 其他后台线程
+        threading.Thread(target=_report_running, daemon=True).start()
+        threading.Thread(target=_worker_pre_wake, daemon=True).start()
+        threading.Thread(target=_auto_update_loop, daemon=True).start()
+        threading.Thread(target=_disk_monitor_loop, daemon=True).start()
+        terminal.start_cleanup()
+
+        logger.info(f"[boot] === 全部初始化完成 ({time.time()-t0:.1f}s) ===")
+    except Exception as e:
+        logger.error(f"[boot] 延迟初始化失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+# ==================== 入口 ====================
 def run():
     global leader, proc_mgr, tunnel_mgr
+    t0 = time.time()
+
+    # === 阶段1：最小启动（优先连上隧道）===
+    logger.info("[boot] === 阶段1：最小启动 ===")
     init_instance()
     os.makedirs(config.FILES_DIR, exist_ok=True)
     os.makedirs(config.LOGS_DIR, exist_ok=True)
+    logger.info(f"[boot] init_instance 完成: host={inst_cfg.tunnel_host} ({time.time()-t0:.1f}s)")
 
     # 信号处理（销毁前最终快照）
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
-    # 数据恢复
-    JOB_STATE["load_status"] = persistence.load_or_create(inst_cfg)
-    persistence.save_prev_backup(inst_cfg)
-
-    # 系统配置恢复 + 瘦身 + 调优
-    try:
-        syscfg.restore_system_config()
-    except Exception as e:
-        logger.error(f"[sysbackup] 恢复失败: {e}")
-    threading.Thread(target=_system_trim, daemon=True).start()
-    _tune_network()
-    threading.Thread(target=_sysbackup_loop, daemon=True).start()
-
-    # shell 配置 + setup.sh
-    _write_shell_profile()
-    _run_setup()
-
-    # 进程持久化：恢复并启动监控
-    proc_mgr = ProcessManager(inst_cfg)
-    try:
-        restored, failed = proc_mgr.restore_all()
-        logger.info(f"[process] 恢复 {restored} 个进程，失败 {failed} 个")
-    except Exception as e:
-        logger.error(f"[process] 恢复异常: {e}")
-    proc_mgr.start_monitor()
-
-    # 预下载 attacker
-    try:
-        attack_mod.ensure_attacker()
-    except Exception as e:
-        logger.error(f"[attack] 预下载 attacker 失败: {e}")
-
-    logger.info(f"=== Worker 实例 {config.INSTANCE_ID} 启动 ===")
-    logger.info(f"=== 固定域名: {inst_cfg.tunnel_host} ===")
-
-    # Leader 锁（manager 后端）
-    leader = core_lock.LeaderLock(backend="manager", instance_id=config.INSTANCE_ID)
-    leader.acquire()
-    if leader.is_leader:
-        threading.Thread(target=_backup_loop, daemon=True).start()
-        threading.Thread(target=leader.heartbeat_loop, daemon=True).start()
-    else:
-        def _on_promote():
-            JOB_STATE["load_status"] = persistence.load_or_create(inst_cfg)
-            threading.Thread(target=_backup_loop, daemon=True).start()
-            threading.Thread(target=leader.heartbeat_loop, daemon=True).start()
-            logger.info(f"[lock] follower 提升为 leader，已启动备份+心跳")
-        threading.Thread(target=leader.follower_loop, args=(_on_promote,), daemon=True).start()
-
-    # 隧道（异步启动）
+    # 立即启动隧道（不等其他初始化，防止卡住导致 1033）
     tunnel_mgr = TunnelManager(inst_cfg)
     JOB_STATE["last_url"] = tunnel_mgr.url
     tunnel_mgr.start_async()
+    logger.info(f"[boot] 隧道已异步启动: {tunnel_mgr.url} ({time.time()-t0:.1f}s)")
 
-    # 其他后台线程
-    threading.Thread(target=_report_running, daemon=True).start()
-    threading.Thread(target=_worker_pre_wake, daemon=True).start()
-    threading.Thread(target=_auto_update_loop, daemon=True).start()
-    threading.Thread(target=_disk_monitor_loop, daemon=True).start()
-    terminal.start_cleanup()
-
-    # 注册进程管理 API
+    # 创建 proc_mgr 并注册 API（进程恢复在延迟初始化中做）
+    proc_mgr = ProcessManager(inst_cfg)
     proc_api.init_process_api(proc_mgr)
     app.register_blueprint(proc_api.bp)
 
+    # 启动延迟初始化（后台线程）
+    threading.Thread(target=_deferred_init, daemon=True).start()
+
+    # 启动 Flask 服务（阻塞）
     log.request_logger(app)
+    logger.info(f"[boot] Flask 服务启动中... 端口 {config.PORT} ({time.time()-t0:.1f}s)")
     socketio.run(app, host="0.0.0.0", port=config.PORT, allow_unsafe_werkzeug=True)
