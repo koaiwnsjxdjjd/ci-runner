@@ -126,4 +126,4 @@ def delete_tunnel_by_name(hostname):
     # 删除隧道
     cf_request("DELETE",
         f"https://api.cloudflare.com/client/v4/accounts/{config.CF_ACCOUNT_ID}/cfd_tunnel/{tid}")
-    logger.info(f"[tunnel] 隧道已按名称删除: {name}")
+    logger.info(f"[tunnel] 隧道已按名称删除: {hostname}")
