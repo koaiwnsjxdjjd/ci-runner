@@ -107,31 +107,74 @@ def _scan_worker_configs():
 
 def ensure_instances_self_heal(manager_token=None):
     """
-    实例清单自愈：若清单缺失或为空，自动从各账号 fork 重建。
-    返回重建的实例数；若清单正常则返回 0。
+    实例清单自愈（完整版）：
+    1. 清单为空 → 从配置文件全部重建
+    2. 清单不完整（缺少实例）→ 只恢复缺失的实例
+    3. 清单完整 → 跳过
     """
     tok = manager_token or config.GH_TOKEN
     existing = load_instances(token=tok)
-    if existing:
-        logger.info(f"[heal] 实例清单正常（{len(existing)} 个），无需自愈")
-        return 0
-    logger.warning("[heal] 实例清单为空/缺失，尝试从账号 fork 自动重建...")
+
+    # 扫描所有配置文件
     cfgs = _scan_worker_configs()
+
     if not cfgs:
-        logger.warning("[heal] 未扫描到任何 worker 配置，无法重建")
+        if existing:
+            logger.info(f"[heal] 实例清单正常（{len(existing)} 个），无配置文件可扫描")
+            return 0
+        logger.warning("[heal] 实例清单为空且无配置文件，无法自愈")
         return 0
-    instances = []
+
+    if not existing:
+        # 清单为空，全部重建
+        logger.warning("[heal] 实例清单为空/缺失，从配置文件全部重建...")
+        instances = []
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        for inst_id, cfg in cfgs.items():
+            hostname = cfg.get("hostname") or f"{inst_id}.{config.BASE_DOMAIN}"
+            mcp_hostname = cfg.get("mcp_hostname", "") or f"mcp-{hostname}"
+            instances.append({
+                "id": inst_id,
+                "hostname": hostname,
+                "account": cfg.get("account", ""),
+                "account_repo": cfg.get("account_repo", ""),
+                "tunnel_id": cfg.get("tunnel_id", ""),
+                "tunnel_token": cfg.get("tunnel_token", ""),
+                "mcp_hostname": mcp_hostname,
+                "mcp_tunnel_id": cfg.get("mcp_tunnel_id", ""),
+                "mcp_url": f"https://{mcp_hostname}" if cfg.get("mcp_tunnel_id") else None,
+                "run_id": None,
+                "status": "running",
+                "url": f"https://{hostname}",
+                "closed": False,
+                "created_at": now,
+            })
+        if save_instances(instances, token=tok):
+            logger.info(f"[heal] 实例清单已全部重建，共 {len(instances)} 个实例")
+            return len(instances)
+        return 0
+
+    # 清单不为空，检查是否完整
+    existing_ids = {i.get("id") for i in existing if not i.get("closed")}
+    missing_ids = set(cfgs.keys()) - existing_ids
+
+    if not missing_ids:
+        logger.info(f"[heal] 实例清单正常且完整（{len(existing)} 个），无需自愈")
+        return 0
+
+    # 有缺失的实例，只恢复缺失的（不碰已有的）
+    logger.warning(f"[heal] 实例清单缺少 {len(missing_ids)} 个实例: {missing_ids}")
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    for inst_id, cfg in cfgs.items():
+    for inst_id in missing_ids:
+        cfg = cfgs[inst_id]
         hostname = cfg.get("hostname") or f"{inst_id}.{config.BASE_DOMAIN}"
         mcp_hostname = cfg.get("mcp_hostname", "") or f"mcp-{hostname}"
-        instances.append({
+        existing.append({
             "id": inst_id,
             "hostname": hostname,
             "account": cfg.get("account", ""),
             "account_repo": cfg.get("account_repo", ""),
             "tunnel_id": cfg.get("tunnel_id", ""),
-            "tunnel_token": cfg.get("tunnel_token", ""),
             "tunnel_token": cfg.get("tunnel_token", ""),
             "mcp_hostname": mcp_hostname,
             "mcp_tunnel_id": cfg.get("mcp_tunnel_id", ""),
@@ -142,21 +185,11 @@ def ensure_instances_self_heal(manager_token=None):
             "closed": False,
             "created_at": now,
         })
-    if save_instances(instances, token=tok):
-        logger.info(f"[heal] 实例清单已自动重建，共 {len(instances)} 个实例")
-        return len(instances)
-    return 0
+        logger.info(f"[heal] 恢复缺失实例: {inst_id}")
 
-
-def _next_inst_id(instances):
-    nums = []
-    for inst in instances:
-        try:
-            nums.append(int(inst["id"].replace("inst", "")))
-        except Exception:
-            pass
-    return f"inst{max(nums) + 1 if nums else 1}"
-
+    if save_instances(existing, token=tok):
+        logger.info(f"[heal] 已恢复 {len(missing_ids)} 个缺失实例，清单共 {len(existing)} 个")
+    return len(missing_ids)
 
 # ==================== 账号仓库操作 ====================
 def _account_repo_url(repo, path):
