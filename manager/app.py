@@ -426,11 +426,17 @@ def run():
         threading.Thread(target=_start_tunnel, daemon=True).start()
     else:
         def _on_promote():
-            # follower 升级为 leader 后，必须启动隧道（否则隧道无人启动）
+            # follower 升级为 leader 后，启动隧道 + 自愈 + MCP补创建
             if not config.TUNNEL_TOKEN:
                 return
             threading.Thread(target=_start_tunnel, daemon=True).start()
-            logger.info("[lock] follower 升级为 leader，启动隧道")
+            # 启动实例自愈 + MCP 隧道补创建
+            def _promote_heal():
+                instances.ensure_instances_self_heal()
+                instances.ensure_mcp_tunnels()
+            threading.Thread(target=_promote_heal, daemon=True).start()
+            threading.Thread(target=_heal_loop, daemon=True).start()
+            logger.info("[lock] follower 升级为 leader，启动隧道+自愈+MCP补创建")
         threading.Thread(target=leader.follower_loop,
                          args=(_on_promote,), daemon=True).start()
     threading.Thread(target=_manager_pre_wake, daemon=True).start()
