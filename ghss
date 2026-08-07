@@ -1,0 +1,4 @@
+#!/bin/bash
+# ghbox 管理客户端全局命令
+cd /data/data/com.termux/files/home/ghbox
+exec python3 -m cli.ghss_cli "$@"
