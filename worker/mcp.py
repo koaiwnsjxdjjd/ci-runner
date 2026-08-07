@@ -155,15 +155,69 @@ class McpManager:
         logger.info(f"[mcp] MCP 隧道已异步启动: https://{host}")
         return True
 
+    # ==================== 端口冲突防护 ====================
+    def _is_port_in_use(self, port):
+        """检查端口是否被占用"""
+        try:
+            result = subprocess.run(
+                ["ss", "-tlnp"], capture_output=True, text=True, timeout=5)
+            return f":{port} " in result.stdout
+        except Exception:
+            return False
+
+    def _kill_port_process(self, port):
+        """杀掉占用指定端口的进程（按PID精准杀）"""
+        import re
+        try:
+            result = subprocess.run(
+                ["ss", "-tlnp"], capture_output=True, text=True, timeout=5)
+            for line in result.stdout.split("\n"):
+                if f":{port} " in line:
+                    match = re.search(r'pid=(\d+)', line)
+                    if match:
+                        pid = int(match.group(1))
+                        try:
+                            os.kill(pid, 9)
+                            logger.info(f"[mcp] 已杀掉占用端口 {port} 的进程 (pid={pid})")
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.warning(f"[mcp] 查杀端口 {port} 进程失败: {e}")
+
+    def _is_mcp_healthy(self):
+        """检查本地 MCP 服务是否健康"""
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                 f"http://localhost:{MCP_PORT}/health"],
+                capture_output=True, text=True, timeout=5)
+            return result.stdout.strip() == "200"
+        except Exception:
+            return False
+
     # ==================== 服务启动/停止 ====================
     def start(self):
-        """启动 MCP 服务（依赖 + 隧道 + node 进程）"""
+        """启动 MCP 服务（依赖 + 隧道 + node 进程）
+        防端口冲突：如果端口已被占用且服务健康，跳过启动；
+        如果端口被占用但服务不健康，杀旧进程后重启。
+        """
         if not self.ensure_server():
             logger.error("[mcp] 依赖准备失败，MCP 服务不启动")
             return False
 
         # 启动隧道
         self._start_tunnel()
+
+        # 端口冲突防护：进程持久化可能已恢复了旧 MCP 进程
+        if self._is_port_in_use(MCP_PORT):
+            if self._is_mcp_healthy():
+                logger.info(f"[mcp] 端口 {MCP_PORT} 已有健康 MCP 服务运行（进程持久化恢复），跳过重复启动")
+                self.ready = True
+                return True
+            else:
+                logger.warning(f"[mcp] 端口 {MCP_PORT} 被占用但服务不健康，杀旧进程后重启")
+                self._kill_port_process(MCP_PORT)
+                time.sleep(1)
 
         # 启动 MCP 服务
         env = os.environ.copy()
