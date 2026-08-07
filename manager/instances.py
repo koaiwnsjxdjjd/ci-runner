@@ -442,16 +442,11 @@ def ensure_mcp_tunnels(manager_token=None):
         try:
             mcp_tid, mcp_ttoken = tunnels.create_mcp_tunnel(mcp_hostname)
         except Exception as e:
-            # 策略4: 409 → 删除重建
+            # 409 = 隧道已存在，说明之前创建过，配置文件应该有token
+            # 不删除重建（会导致DNS丢失+服务中断），直接跳过
             if 'already have a tunnel' in str(e) or '1013' in str(e):
-                logger.warning(f'[mcp-heal] {inst["id"]} 隧道已存在但无token，删除重建')
-                tunnels.delete_tunnel_by_name(mcp_hostname)
-                time.sleep(10)
-                try:
-                    mcp_tid, mcp_ttoken = tunnels.create_mcp_tunnel(mcp_hostname)
-                except Exception as e2:
-                    logger.warning(f'[mcp-heal] {inst["id"]} 重建失败: {e2}')
-                    continue
+                logger.info(f'[mcp-heal] {inst["id"]} MCP 隧道已存在，跳过（worker 从配置文件读取 token）')
+                continue
             else:
                 logger.warning(f'[mcp-heal] {inst["id"]} 创建失败: {e}')
                 continue
