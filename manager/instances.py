@@ -378,66 +378,108 @@ def worker_report(inst_id, url, manager_token=None):
     return {"ok": True}
 
 # ==================== MCP 隧道自动补创建 ====================
+def _load_instance_config(account, inst_id):
+    """从账号仓库读取实例配置文件"""
+    repo = account.get('repo') or config.REPO
+    token = account.get('token')
+    asset_name = f'inst-{inst_id}.json.enc'
+    url = _account_repo_url(repo, f'/releases/tags/{config.BACKUP_TAG}')
+    status, d = ghapi.gh_request('GET', url, token=token)
+    if status != 200:
+        return None
+    for a in d.get('assets', []):
+        if a.get('name') == asset_name:
+            from core import crypto
+            status2, blob = ghapi.gh_request('GET',
+                f'{ghapi.API_BASE}/repos/{repo}/releases/assets/{a["id"]}',
+                token=token, raw=True,
+                headers={'Accept': 'application/octet-stream'})
+            if status2 == 200 and blob:
+                try:
+                    return crypto.decrypt_json(blob)
+                except Exception:
+                    return None
+    return None
+
+
 def ensure_mcp_tunnels(manager_token=None):
     """
-    自动为缺少 MCP 隧道的实例补创建 MCP 隧道。
-    在 manager 的自愈循环中调用，完全自动化。
+    自动确保每个实例有 MCP 隧道。
+    策略（优先级从高到低，零中断）：
+    1. 实例清单已有 mcp_tunnel_id → 跳过
+    2. 从配置文件恢复 MCP 信息 → 更新实例清单（不碰已有隧道）
+    3. 创建新隧道 → 保存到配置文件和实例清单
+    4. 创建时409（隧道已存在但无token）→ 删除重建（等待10秒避免409）
     """
     tok = manager_token or config.GH_TOKEN
-    instances = load_instances(token=tok)
+    instances_list = load_instances(token=tok)
     changed = False
-    for inst in instances:
+    for inst in instances_list:
         if inst.get('closed'):
             continue
         if inst.get('mcp_tunnel_id'):
             continue
+
         hostname = inst.get('hostname', '')
         if not hostname:
             continue
         mcp_hostname = f'mcp-{hostname}'
+
+        # 策略2: 从配置文件恢复
+        account = next((a for a in accounts.load_accounts(token=tok)
+                       if a['name'] == inst.get('account')), None)
+        if account:
+            cfg = _load_instance_config(account, inst['id'])
+            if cfg and cfg.get('mcp_tunnel_id') and cfg.get('mcp_tunnel_token'):
+                inst['mcp_hostname'] = cfg.get('mcp_hostname', mcp_hostname)
+                inst['mcp_tunnel_id'] = cfg['mcp_tunnel_id']
+                inst['mcp_url'] = f'https://{inst["mcp_hostname"]}'
+                changed = True
+                logger.info(f'[mcp-heal] 从配置文件恢复 {inst["id"]} MCP 信息: {inst["mcp_hostname"]}')
+                continue
+
+        # 策略3: 创建新隧道
         try:
             mcp_tid, mcp_ttoken = tunnels.create_mcp_tunnel(mcp_hostname)
         except Exception as e:
-            # 409 = 隧道已存在（可能是之前创建过但清单丢失），删除重建
+            # 策略4: 409 → 删除重建
             if 'already have a tunnel' in str(e) or '1013' in str(e):
-                logger.warning(f'[mcp-heal] {inst["id"]} MCP 隧道已存在，删除重建: {mcp_hostname}')
+                logger.warning(f'[mcp-heal] {inst["id"]} 隧道已存在但无token，删除重建')
+                tunnels.delete_tunnel_by_name(mcp_hostname)
+                time.sleep(10)
                 try:
-                    tunnels.delete_tunnel_by_name(mcp_hostname)
-                    time.sleep(2)
                     mcp_tid, mcp_ttoken = tunnels.create_mcp_tunnel(mcp_hostname)
                 except Exception as e2:
-                    logger.warning(f'[mcp-heal] {inst["id"]} 重建 MCP 隧道失败: {e2}')
+                    logger.warning(f'[mcp-heal] {inst["id"]} 重建失败: {e2}')
                     continue
             else:
-                logger.warning(f'[mcp-heal] 为 {inst["id"]} 创建 MCP 隧道失败: {e}')
+                logger.warning(f'[mcp-heal] {inst["id"]} 创建失败: {e}')
                 continue
-        try:
-            inst['mcp_hostname'] = mcp_hostname
-            inst['mcp_tunnel_id'] = mcp_tid
-            inst['mcp_url'] = f'https://{mcp_hostname}'
-            logger.info(f'[mcp-heal] 为 {inst["id"]} 补创建 MCP 隧道: {mcp_hostname}')
-            # 更新实例配置文件（worker 从这里读取 MCP 隧道 token）
-            account = next((a for a in accounts.load_accounts(token=tok)
-                           if a['name'] == inst.get('account')), None)
-            if account:
-                try:
-                    _save_instance_config(account, inst['id'], {
-                        'inst_id': inst['id'],
-                        'hostname': hostname,
-                        'tunnel_token': inst.get('tunnel_token', ''),
-                        'tunnel_id': inst.get('tunnel_id', ''),
-                        'mcp_hostname': mcp_hostname,
-                        'mcp_tunnel_token': mcp_ttoken,
-                        'mcp_tunnel_id': mcp_tid,
-                        'account': inst.get('account', ''),
-                        'account_repo': inst.get('account_repo', ''),
-                    })
-                except Exception as e:
-                    logger.warning(f'[mcp-heal] 更新 {inst["id"]} 配置文件失败: {e}')
-            changed = True
-        except Exception as e:
-            logger.warning(f'[mcp-heal] 为 {inst["id"]} 创建 MCP 隧道失败: {e}')
+
+        inst['mcp_hostname'] = mcp_hostname
+        inst['mcp_tunnel_id'] = mcp_tid
+        inst['mcp_url'] = f'https://{mcp_hostname}'
+        logger.info(f'[mcp-heal] 为 {inst["id"]} 创建 MCP 隧道: {mcp_hostname}')
+
+        # 保存到配置文件
+        if account:
+            try:
+                _save_instance_config(account, inst['id'], {
+                    'inst_id': inst['id'],
+                    'hostname': hostname,
+                    'tunnel_token': inst.get('tunnel_token', ''),
+                    'tunnel_id': inst.get('tunnel_id', ''),
+                    'mcp_hostname': mcp_hostname,
+                    'mcp_tunnel_token': mcp_ttoken,
+                    'mcp_tunnel_id': mcp_tid,
+                    'account': inst.get('account', ''),
+                    'account_repo': inst.get('account_repo', ''),
+                })
+            except Exception as e:
+                logger.warning(f'[mcp-heal] 保存 {inst["id"]} 配置失败: {e}')
+        changed = True
+
     if changed:
-        save_instances(instances, token=tok)
-        logger.info('[mcp-heal] MCP 隧道补创建完成')
+        save_instances(instances_list, token=tok)
+        logger.info('[mcp-heal] MCP 隧道处理完成')
     return changed
