@@ -71,47 +71,52 @@ class McpManager:
         self._copy_server_code()
 
         # 尝试从主仓库 Releases 下载预编译依赖
+        download_ok = False
         try:
             logger.info("[mcp] 尝试从 Releases 下载预编译依赖...")
             blob = storage.download_asset_chunked(
                 MCP_DEPS_ASSET, token=config.GH_TOKEN, repo=config.MAIN_REPO)
             if blob:
+                logger.info(f"[mcp] 依赖包下载完成（{len(blob)} 字节），解压中...")
                 with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
                     tar.extractall(path=MCP_SERVER_DIR, filter="data")
                 logger.info(f"[mcp] 预编译依赖已恢复（{len(blob)} 字节）")
                 # 验证
                 if os.path.isdir(node_modules):
-                    return True
-                logger.warning("[mcp] 解压后 node_modules 不存在，继续尝试 npm install")
+                    download_ok = True
+                else:
+                    logger.warning("[mcp] 解压后 node_modules 不存在，继续尝试 npm install")
             else:
                 logger.warning("[mcp] Releases 中无预编译依赖")
         except Exception as e:
             logger.warning(f"[mcp] 下载预编译依赖失败: {e}")
+        if download_ok:
+            return True
 
-        # 回退到 npm install
-        logger.info("[mcp] 回退到 npm install...")
+        # 回退到 npm install（后台线程执行，避免阻塞 worker 启动）
+        logger.info("[mcp] 回退到 npm install（后台执行）...")
         try:
             result = subprocess.run(
-                ["npm", "install", "--no-audit", "--no-fund"],
+                ["npm", "install", "--no-audit", "--no-fund", "--loglevel=warn"],
                 cwd=MCP_SERVER_DIR,
-                capture_output=True, text=True, timeout=600)
+                capture_output=True, text=True, timeout=300)
             if result.returncode == 0:
                 logger.info("[mcp] npm install 完成")
-                # 尝试安装 playwright 浏览器
+                # 尝试安装 playwright 浏览器（后台，失败不影响核心功能）
                 try:
                     subprocess.run(
                         ["npx", "playwright", "install", "chromium"],
                         cwd=MCP_SERVER_DIR,
-                        capture_output=True, text=True, timeout=300)
+                        capture_output=True, text=True, timeout=180)
                     logger.info("[mcp] playwright chromium 安装完成")
                 except Exception as e:
                     logger.warning(f"[mcp] playwright install 失败（不影响核心功能）: {e}")
                 return os.path.isdir(node_modules)
             else:
-                logger.error(f"[mcp] npm install 失败: {result.stderr[:500]}")
+                logger.error(f"[mcp] npm install 失败: {result.stderr[:300]}")
                 return False
         except subprocess.TimeoutExpired:
-            logger.error("[mcp] npm install 超时（10分钟）")
+            logger.error("[mcp] npm install 超时（5分钟），MCP 服务暂不启动")
             return False
         except Exception as e:
             logger.error(f"[mcp] npm install 异常: {e}")

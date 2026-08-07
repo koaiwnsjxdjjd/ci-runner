@@ -69,21 +69,34 @@ def _auto_cleanup_account(account):
 
 
 def health_monitor_loop():
-    """实例健康巡检"""
+    """实例健康巡检（restarting自动恢复 + 防重启风暴）"""
     while True:
         time.sleep(60)
         try:
             insts = instances.list_instances()
             changed = False
             for inst in insts:
-                if inst.get("status") != "running" or inst.get("closed"):
+                if inst.get("closed"):
                     continue
                 host = inst.get("hostname")
                 if not host:
                     continue
                 if check_health(host):
                     _fail_counts[inst["id"]] = 0
+                    # 恢复健康：无论之前什么状态，都改回 running
+                    if inst.get("status") != "running":
+                        inst["status"] = "running"
+                        changed = True
+                        logger.info(f"[monitor] 实例 {inst['id']} 恢复健康 -> running")
                 else:
+                    # 只有 running 状态才计数重启
+                    if inst.get("status") != "running":
+                        continue
+                    # 防重启风暴：worker 刚上报过则不重启
+                    last_seen = inst.get("last_seen", 0)
+                    if isinstance(last_seen, (int, float)) and last_seen and time.time() - last_seen < 180:
+                        _fail_counts[inst["id"]] = 0
+                        continue
                     n = _fail_counts.get(inst["id"], 0) + 1
                     _fail_counts[inst["id"]] = n
                     logger.warning(f"[monitor] 实例 {inst['id']} 失败 {n}/3")
@@ -95,6 +108,7 @@ def health_monitor_loop():
                         else:
                             _restart_instance(inst)
                             inst["status"] = "restarting"
+                            logger.info(f"[monitor] 实例 {inst['id']} 已标记 restarting 并触发重启")
                         _fail_counts[inst["id"]] = 0
                         changed = True
             if changed:

@@ -393,19 +393,20 @@ def _backup_loop():
 
 
 def _report_running():
-    """向 manager 上报实例运行状态"""
+    """周期向 manager 上报实例运行状态（每 60 秒，保证状态不卡 restarting）"""
     mgr_host = os.environ.get("MANAGER_HOST", "ghvps2.kekeke.cc.cd")
-    try:
-        url = f"https://{mgr_host}/api/instances/{config.INSTANCE_ID}/report"
-        payload = json.dumps({"token": config.EXEC_TOKEN,
-                              "url": f"https://{inst_cfg.tunnel_host}"}).encode()
-        req = urllib.request.Request(url, data=payload,
-                                     headers={"Content-Type": "application/json",
-                                              "User-Agent": "Mozilla/5.0 (ghbox-worker)"})
-        urllib.request.urlopen(req, timeout=20)
-        logger.info(f"[report] 已向 manager 上报 running")
-    except Exception as e:
-        logger.warning(f"[report] 上报失败: {e}")
+    while True:
+        try:
+            url = f"https://{mgr_host}/api/instances/{config.INSTANCE_ID}/report"
+            payload = json.dumps({"token": config.EXEC_TOKEN,
+                                  "url": f"https://{inst_cfg.tunnel_host}"}).encode()
+            req = urllib.request.Request(url, data=payload,
+                                         headers={"Content-Type": "application/json",
+                                                  "User-Agent": "Mozilla/5.0 (ghbox-worker)"})
+            urllib.request.urlopen(req, timeout=20)
+        except Exception as e:
+            logger.warning(f"[report] 上报失败: {e}")
+        time.sleep(60)
 
 
 def _worker_pre_wake():
