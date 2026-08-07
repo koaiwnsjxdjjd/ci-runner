@@ -124,12 +124,16 @@ def ensure_instances_self_heal(manager_token=None):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     for inst_id, cfg in cfgs.items():
         hostname = cfg.get("hostname") or f"{inst_id}.{config.BASE_DOMAIN}"
+        mcp_hostname = cfg.get("mcp_hostname", "") or f"mcp-{hostname}"
         instances.append({
             "id": inst_id,
             "hostname": hostname,
             "account": cfg.get("account", ""),
             "account_repo": cfg.get("account_repo", ""),
             "tunnel_id": cfg.get("tunnel_id", ""),
+            "mcp_hostname": mcp_hostname,
+            "mcp_tunnel_id": cfg.get("mcp_tunnel_id", ""),
+            "mcp_url": f"https://{mcp_hostname}" if cfg.get("mcp_tunnel_id") else None,
             "run_id": None,
             "status": "running",
             "url": f"https://{hostname}",
@@ -393,6 +397,21 @@ def ensure_mcp_tunnels(manager_token=None):
         mcp_hostname = f'mcp-{hostname}'
         try:
             mcp_tid, mcp_ttoken = tunnels.create_mcp_tunnel(mcp_hostname)
+        except Exception as e:
+            # 409 = 隧道已存在（可能是之前创建过但清单丢失），删除重建
+            if 'already have a tunnel' in str(e) or '1013' in str(e):
+                logger.warning(f'[mcp-heal] {inst["id"]} MCP 隧道已存在，删除重建: {mcp_hostname}')
+                try:
+                    tunnels.delete_tunnel_by_name(mcp_hostname)
+                    time.sleep(2)
+                    mcp_tid, mcp_ttoken = tunnels.create_mcp_tunnel(mcp_hostname)
+                except Exception as e2:
+                    logger.warning(f'[mcp-heal] {inst["id"]} 重建 MCP 隧道失败: {e2}')
+                    continue
+            else:
+                logger.warning(f'[mcp-heal] 为 {inst["id"]} 创建 MCP 隧道失败: {e}')
+                continue
+        try:
             inst['mcp_hostname'] = mcp_hostname
             inst['mcp_tunnel_id'] = mcp_tid
             inst['mcp_url'] = f'https://{mcp_hostname}'

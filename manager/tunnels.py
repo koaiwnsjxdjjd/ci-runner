@@ -90,3 +90,36 @@ def delete_tunnel(tunnel_id, hostname):
 def create_mcp_tunnel(hostname):
     """创建 MCP 专用隧道（服务指向 3457 端口）"""
     return create_tunnel(hostname, service_url="http://localhost:3457")
+
+
+def find_tunnel_by_name(name):
+    """按名称查找隧道，返回隧道 dict 或 None"""
+    if not all([config.CF_EMAIL, config.CF_API_KEY, config.CF_ACCOUNT_ID]):
+        return None
+    status, d = cf_request("GET",
+        f"https://api.cloudflare.com/client/v4/accounts/{config.CF_ACCOUNT_ID}/cfd_tunnel?name={name}")
+    if status == 200 and d.get("result"):
+        return d["result"][0]
+    return None
+
+
+def delete_tunnel_by_name(name):
+    """按名称删除隧道（含DNS记录）"""
+    t = find_tunnel_by_name(name)
+    if not t:
+        return
+    tid = t.get("id")
+    if not tid:
+        return
+    # 删除 DNS 记录
+    if config.CF_ZONE_ID:
+        status, d = cf_request("GET",
+            f"https://api.cloudflare.com/client/v4/zones/{config.CF_ZONE_ID}/dns_records?name={name}")
+        if status == 200:
+            for rec in d.get("result", []):
+                cf_request("DELETE",
+                    f"https://api.cloudflare.com/client/v4/zones/{config.CF_ZONE_ID}/dns_records/{rec['id']}")
+    # 删除隧道
+    cf_request("DELETE",
+        f"https://api.cloudflare.com/client/v4/accounts/{config.CF_ACCOUNT_ID}/cfd_tunnel/{tid}")
+    logger.info(f"[tunnel] 隧道已按名称删除: {name}")
