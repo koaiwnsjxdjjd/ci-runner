@@ -33,39 +33,32 @@ def load_instances(token=None):
 
 def save_instances(instances, token=None):
     """
-    保存实例清单（增强版数据保护）：
-    1. 空数据保护：新数据为空且已有数据 → 拒绝
-    2. 数量骤减保护：新数据 < 旧数据一半（且旧数据>2）→ 拒绝（防并发覆盖）
-    3. 写前备份旧数据到 .bak
+    保存实例清单（绝对保护版）：
+    绝对禁止空数据保存，不管什么情况。
+    数量骤减保护：新数据 < 旧数据一半 → 拒绝。
     """
     tok = token or config.GH_TOKEN
+    # 绝对禁止空数据保存（防止GitHub API故障导致清单丢失）
     if not instances:
-        existing = load_instances(token=tok)
-        if existing:
-            logger.warning("[protect] 拒绝空数据覆盖实例清单")
+        logger.warning("[protect] 绝对禁止空数据覆盖实例清单")
+        return False
+    # 数量骤减保护
+    try:
+        old = load_instances(token=tok)
+        old_count = len(old)
+        new_count = len(instances)
+        if old_count > 2 and new_count < old_count / 2:
+            logger.warning(f"[protect] 拒绝数量骤减覆盖：{old_count}→{new_count}")
             return False
+    except Exception:
+        pass
+    # 写前备份
+    try:
         blob = storage.download_asset(config.ASSET_INSTANCES, token=tok)
         if blob:
-            logger.warning("[protect] 读取异常，拒绝空覆盖实例清单")
-            return False
-    else:
-        # 数量骤减保护
-        try:
-            old = load_instances(token=tok)
-            old_count = len(old)
-            new_count = len(instances)
-            if old_count > 2 and new_count < old_count / 2:
-                logger.warning(f"[protect] 拒绝数量骤减覆盖：{old_count}→{new_count}（疑似并发丢数据）")
-                return False
-        except Exception:
-            pass
-        # 写前备份旧数据
-        try:
-            blob = storage.download_asset(config.ASSET_INSTANCES, token=tok)
-            if blob:
-                storage.upload_asset(f"{config.ASSET_INSTANCES}.bak", blob, token=tok)
-        except Exception:
-            pass
+            storage.upload_asset(f"{config.ASSET_INSTANCES}.bak", blob, token=tok)
+    except Exception:
+        pass
     storage.save_json_enc(config.ASSET_INSTANCES, instances, token=tok)
     return True
 
