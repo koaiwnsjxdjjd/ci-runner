@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
