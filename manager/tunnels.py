@@ -8,6 +8,7 @@ Cloudflare 隧道自动管理（manager 侧）
 - 处理「创建时 config 不生效」的坑（单独 PUT configurations）
 """
 import json
+import time
 import urllib.request
 import urllib.error
 
@@ -47,13 +48,19 @@ def create_tunnel(hostname, service_url="http://localhost:8080"):
     if not all([config.CF_EMAIL, config.CF_API_KEY, config.CF_ACCOUNT_ID]):
         raise RuntimeError("CF 凭证未配置")
     name = "t-" + hostname.split(".")[0]
-    # 1. 创建隧道
-    status, d = cf_request("POST",
-        f"https://api.cloudflare.com/client/v4/accounts/{config.CF_ACCOUNT_ID}/cfd_tunnel",
-        data={"name": name, "config_src": "cloudflare",
-              "config": {"ingress": [{"hostname": hostname, "service": service_url},
-                                      {"service": "http_status:404"}]}})
-    if status not in (200, 201):
+    # 1. 创建隧道（409时用唯一名称重试）
+    for attempt in range(3):
+        tunnel_name = name if attempt == 0 else f"{name}-{int(time.time())}"
+        status, d = cf_request("POST",
+            f"https://api.cloudflare.com/client/v4/accounts/{config.CF_ACCOUNT_ID}/cfd_tunnel",
+            data={"name": tunnel_name, "config_src": "cloudflare",
+                  "config": {"ingress": [{"hostname": hostname, "service": service_url},
+                                          {"service": "http_status:404"}]}})
+        if status in (200, 201):
+            break
+        if status == 409 and attempt < 2:
+            time.sleep(5)
+            continue
         raise RuntimeError(f"创建隧道失败: {status} {d}")
     tid = d["result"]["id"]
     ttoken = d["result"]["token"]
