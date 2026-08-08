@@ -165,6 +165,9 @@ def is_system(info, worker_pids):
     # 攻击进程
     if "attacker" in cmd:
         return True
+    # MCP 服务进程（由 mcp.py 独立管理，不需要进程持久化恢复）
+    if "node" in cmd and "index.js" in cmd:
+        return True
     return False
 
 
