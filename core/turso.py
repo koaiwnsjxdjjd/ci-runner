@@ -62,9 +62,9 @@ def _execute_sql(sql, args=None):
             if isinstance(arg, str):
                 formatted_args.append({"type": "text", "value": arg})
             elif isinstance(arg, int):
-                formatted_args.append({"type": "integer", "value": str(arg)})
+                formatted_args.append({"type": "integer", "value": arg})
             elif isinstance(arg, float):
-                formatted_args.append({"type": "float", "value": str(arg)})
+                formatted_args.append({"type": "float", "value": arg})
             elif arg is None:
                 formatted_args.append({"type": "null"})
             else:
