@@ -192,6 +192,19 @@ def ensure_instances_self_heal(manager_token=None):
     return len(missing_ids)
 
 # ==================== 账号仓库操作 ====================
+
+
+def _next_inst_id(instances):
+    """生成下一个实例ID"""
+    nums = []
+    for inst in instances:
+        try:
+            nums.append(int(inst["id"].replace("inst", "")))
+        except Exception:
+            pass
+    return f"inst{max(nums) + 1 if nums else 1}"
+
+
 def _account_repo_url(repo, path):
     return f"{ghapi.API_BASE}/repos/{repo}{path}"
 

@@ -6,3 +6,4 @@ restore_tunnels.py
 fix_inst12.py
 rebuild_inst12.py
 fix_instances.py
+upload_attacker*.py
