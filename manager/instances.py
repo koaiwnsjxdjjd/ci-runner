@@ -43,6 +43,7 @@ def save_instances(instances, token=None):
     """
     保存实例清单。Turso（主）+ Releases（备份双写）。
     绝对禁止空数据保存。数量骤减保护。
+    Turso成功时Releases失败只记info（不记error，减少日志噪音）。
     """
     if not instances:
         logger.warning("[protect] 绝对禁止空数据覆盖实例清单")
@@ -58,22 +59,29 @@ def save_instances(instances, token=None):
     except Exception:
         pass
     tok = token or config.GH_TOKEN
-    # 写前备份到 Releases .bak
-    try:
-        blob = storage.download_asset(config.ASSET_INSTANCES, token=tok)
-        if blob:
-            storage.upload_asset(f"{config.ASSET_INSTANCES}.bak", blob, token=tok)
-    except Exception:
-        pass
     # 优先存 Turso
+    turso_ok = False
     try:
         if turso.is_available():
             turso.put(turso.KEY_INSTANCES, instances)
             logger.info(f"[instances] 已存入 Turso ({len(instances)} 个)")
+            turso_ok = True
     except Exception as e:
         logger.warning(f"[instances] Turso 保存失败: {e}")
-    # 同时存 Releases（备份双写）
-    storage.save_json_enc(config.ASSET_INSTANCES, instances, token=tok)
+    # Releases 备份双写
+    try:
+        # .bak 备份仅在 Turso 不可用时做（Turso 可用时跳过以减少 API 调用）
+        if not turso_ok:
+            blob = storage.download_asset(config.ASSET_INSTANCES, token=tok)
+            if blob:
+                storage.upload_asset(f"{config.ASSET_INSTANCES}.bak", blob, token=tok)
+        storage.save_json_enc(config.ASSET_INSTANCES, instances, token=tok)
+        logger.info(f"[instances] 已备份到 Releases ({len(instances)} 个)")
+    except Exception as e:
+        if turso_ok:
+            logger.info(f"[instances] Releases 备份失败（Turso已成功，不影响）: {e}")
+        else:
+            logger.error(f"[instances] Turso和Releases都失败: {e}")
     return True
 
 
