@@ -1,0 +1,56 @@
+name: Build Attacker
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build attacker
+        run: |
+          cd attacker
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o attacker attacker.go
+          chmod +x attacker
+          ls -la attacker
+
+      - name: Upload to Releases
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          cd attacker
+          # 获取或创建attacker release
+          RESP=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/qqztceghrgji/demo-vps/releases/tags/attacker")
+          REL_ID=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null)
+          if [ -z "$REL_ID" ]; then
+            RESP=$(curl -s -X POST -H "Authorization: token $GH_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{"tag_name":"attacker","name":"Attacker Engine","body":"Go attack engine"}' \
+              "https://api.github.com/repos/qqztceghrgji/demo-vps/releases")
+            REL_ID=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null)
+          fi
+          echo "Release ID: $REL_ID"
+          # 删除旧asset
+          curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/qqztceghrgji/demo-vps/releases/tags/attacker" | \
+            python3 -c "import json,sys; [print(a['id']) for a in json.load(sys.stdin).get('assets',[]) if a['name']=='attacker']" | \
+            while read AID; do
+              curl -s -X DELETE -H "Authorization: token $GH_TOKEN" \
+                "https://api.github.com/repos/qqztceghrgji/demo-vps/releases/assets/$AID"
+            done
+          # 上传新asset
+          curl -s -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @attacker \
+            "https://uploads.github.com/repos/qqztceghrgji/demo-vps/releases/$REL_ID/assets?name=attacker"
+          echo "Upload done"

@@ -262,12 +262,19 @@ def _cancel_worker(account, run_id):
 
 
 # ==================== 创建实例 ====================
-def create_instance(manager_token=None):
-    """创建新工作实例（全自动）"""
-    sel = accounts.select_best_account(token=manager_token, workflow=config.WORKER_WORKFLOW)
-    if not sel:
-        return {"ok": False, "error": "所有账号并发已满，请稍后再试"}
-    account, running = sel
+def create_instance(manager_token=None, account_name=None):
+    """创建新工作实例（全自动，支持指定账号）"""
+    if account_name:
+        accounts_list = accounts.load_accounts(token=manager_token)
+        account = next((a for a in accounts_list if a["name"] == account_name), None)
+        if not account:
+            return {"ok": False, "error": f"账号 {account_name} 不存在"}
+        running = accounts._account_usage(account, workflow=config.WORKER_WORKFLOW)
+    else:
+        sel = accounts.select_best_account(token=manager_token, workflow=config.WORKER_WORKFLOW)
+        if not sel:
+            return {"ok": False, "error": "所有账号并发已满，请稍后再试"}
+        account, running = sel
 
     instances = load_instances(token=manager_token)
     inst_id = _next_inst_id(instances)

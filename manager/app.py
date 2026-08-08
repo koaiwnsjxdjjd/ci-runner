@@ -219,7 +219,9 @@ def api_list_tasks():
 def api_create_instance():
     if not _require_leader():
         return jsonify(ok=False, error="当前为备份节点，写操作被拒绝"), 503
-    res = instances.create_instance()
+    data = request_get_json()
+    account_name = (data.get("account") or "").strip() or None
+    res = instances.create_instance(account_name=account_name)
     logger.info(f"[api] 创建实例: {res.get('msg', res.get('error'))}")
     return jsonify(res), (200 if res.get("ok") else 409)
 
@@ -227,7 +229,9 @@ def api_create_instance():
 @app.route("/api/instances", methods=["GET"])
 @require_auth
 def api_list_instances():
-    return jsonify(ok=True, instances=instances.list_instances())
+    all_insts = instances.list_instances()
+    active = [i for i in all_insts if not i.get("closed")]
+    return jsonify(ok=True, instances=active)
 
 
 @app.route("/api/instances/<inst_id>", methods=["GET"])
