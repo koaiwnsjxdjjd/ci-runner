@@ -456,9 +456,12 @@ def _auto_update_loop():
             if latest and latest != current_sha:
                 logger.info(f"[update] 检测到新版本 {latest[:10]}，同步 fork + 滚动重启")
                 try:
-                    url2 = f"https://api.github.com/repos/{config.REPO}/merge-upstream"
-                    ghapi.gh_request("POST", url2, data={"branch": "main"})
-                    time.sleep(5)
+                    # force update fork main 分支指向主仓库 SHA（避免 merge commit 导致 SHA 循环）
+                    url2 = f"https://api.github.com/repos/{config.REPO}/git/refs/heads/main"
+                    ghapi.gh_request("PATCH", url2, token=config.GH_TOKEN,
+                                     data={"sha": latest, "force": True})
+                    logger.info(f"[update] fork 已 force update 到 {latest[:10]}")
+                    time.sleep(3)
                 except Exception as e:
                     logger.error(f"[update] fork 同步失败: {e}")
                 url3 = (f"https://api.github.com/repos/{config.REPO}/actions/workflows/"
