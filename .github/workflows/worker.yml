@@ -47,6 +47,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           DEMO_KEY: ${{ secrets.DEMO_KEY }}
           EXEC_TOKEN: ${{ secrets.EXEC_TOKEN }}
+          TURSO_URL: ${{ secrets.TURSO_URL }}
+          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
           MANAGER_HOST: "ghvps2.kekeke.cc.cd"
           PRE_WAKE_SECONDS: "21300"
           WORKER_WORKFLOW: "worker.yml"

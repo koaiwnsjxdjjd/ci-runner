@@ -2,11 +2,10 @@
 """
 多账号管理（manager 侧）
 
-- 账号配置存储到 Turso（优先）+ GitHub Releases（备份双写）
+- 账号配置加密存储到 Releases
 - 幂等全自动创建：验证 token → fork → secrets → 报备
 - 负载均衡（选并发余量最大的账号）
 - 脱敏展示
-- 全链路日志
 """
 import time
 import base64
@@ -15,39 +14,30 @@ from nacl.public import PublicKey, SealedBox
 
 import config
 import log
-from core import storage, turso, ghapi
+from core import storage
+from core import ghapi
 
 logger = log.setup_logger("accounts")
 
 
 # ==================== 账号存储 ====================
 def load_accounts(token=None):
-    """读取账号配置。优先 Turso，回退 Releases。"""
-    try:
-        if turso.is_available():
-            data = turso.get(turso.KEY_ACCOUNTS, default=None)
-            if data is not None:
-                logger.info(f"[accounts] 从 Turso 加载 ({len(data)} 个账号)")
-                return data if isinstance(data, list) else []
-    except Exception as e:
-        logger.warning(f"[accounts] Turso 加载失败，回退 Releases: {e}")
+    """读取账号配置（加密）"""
     data = storage.load_json_enc(config.ASSET_ACCOUNTS, token=token, default=[])
-    logger.info(f"[accounts] 从 Releases 加载 ({len(data) if isinstance(data, list) else 0} 个账号)")
     return data if isinstance(data, list) else []
 
 
 def save_accounts(accounts, token=None):
-    """保存账号。Turso（主）+ Releases（备份双写）。空数据保护。"""
+    """保存账号（空数据保护）"""
     if not accounts:
         existing = load_accounts(token=token)
         if existing:
             logger.warning("[protect] 拒绝空数据覆盖账号配置")
             return
-    try:
-        if turso.is_available():
-            turso.put(turso.KEY_ACCOUNTS, accounts)
-    except Exception as e:
-        logger.warning(f"[accounts] Turso 保存失败: {e}")
+        blob = storage.download_asset(config.ASSET_ACCOUNTS, token=token)
+        if blob:
+            logger.warning("[protect] 读取异常，拒绝空覆盖账号配置")
+            return
     storage.save_json_enc(config.ASSET_ACCOUNTS, accounts, token=token)
 
 
@@ -159,7 +149,7 @@ def _ensure_repo(account_token, repo_name):
                                  token=account_token)
     if status == 200:
         return repo_name, True
-    logger.info("[repo] 账号无仓库，fork 主仓库...")
+    logger.info(f"[repo] 账号无仓库，fork 主仓库...")
     status, d = ghapi.gh_request("POST", f"{ghapi.API_BASE}/repos/{config.REPO}/forks",
                                  token=account_token, data={"default_branch_only": True})
     if status not in (200, 202):
@@ -175,11 +165,12 @@ def _ensure_repo(account_token, repo_name):
 
 
 def _wait_workflow_ready(account_token, repo, workflow="worker.yml", timeout=120, max_push=3):
-    """等待 workflow 被注册；超时推送空 commit 触发扫描"""
+    """等待 workflow 被注册；超时推送空 commit 触发扫描（限制推送次数，防死循环）"""
     url = f"{ghapi.API_BASE}/repos/{repo}/actions/workflows"
     deadline = time.time() + timeout
     push_attempts = 0
     while True:
+        # 超过 deadline 且推送次数用尽：退出（不再无限重置超时）
         if time.time() > deadline and push_attempts >= max_push:
             break
         try:
@@ -190,6 +181,7 @@ def _wait_workflow_ready(account_token, repo, workflow="worker.yml", timeout=120
                     return True
         except Exception:
             pass
+        # 超时前 60s 推送空 commit 触发扫描（最多 max_push 次）
         if time.time() > deadline - 60 and push_attempts < max_push:
             try:
                 rd = ghapi.gh_request("GET",
@@ -221,7 +213,6 @@ def auto_provision_account(name, account_token, repo=None, max_conc=None, manage
     if status != 200:
         return {"ok": False, "error": f"token 无效（{status}）"}
     login = user.get("login", "")
-    logger.info(f"[account] 开始配置账号 {name} ({login})")
     # ② 确保仓库
     if not repo:
         repo = f"{login}/{config.REPO.split('/')[-1]}"
@@ -234,14 +225,9 @@ def auto_provision_account(name, account_token, repo=None, max_conc=None, manage
     # ④ 等待 workflow 注册
     if not _wait_workflow_ready(account_token, repo):
         return {"ok": False, "error": "workflow 注册超时（稍后自动重试）"}
-    # ⑤ 配 secrets（包含 TURSO_URL 和 TURSO_TOKEN）
-    needed = {
-        "GH_TOKEN": account_token,
-        "DEMO_KEY": config.DEMO_KEY,
-        "EXEC_TOKEN": config.EXEC_TOKEN,
-        "TURSO_URL": config.TURSO_URL,
-        "TURSO_TOKEN": config.TURSO_TOKEN,
-    }
+    # ⑤ 配 secrets
+    needed = {"GH_TOKEN": account_token, "DEMO_KEY": config.DEMO_KEY,
+              "EXEC_TOKEN": config.EXEC_TOKEN}
     all_ok = True
     for sname, sval in needed.items():
         if not _check_repo_secret(account_token, repo, sname):
@@ -250,7 +236,6 @@ def auto_provision_account(name, account_token, repo=None, max_conc=None, manage
                 logger.error(f"[secrets] {sname} 配置失败")
     if not all_ok:
         return {"ok": False, "error": "secrets 配置失败（将自动重试）"}
-    logger.info(f"[account] 账号 {name} secrets 配置完成（含 TURSO_URL/TURSO_TOKEN）")
     # ⑥ 报备
     return add_account(name, account_token, repo=repo, max_conc=max_conc, token=manager_token)
 

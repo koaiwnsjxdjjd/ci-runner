@@ -1,22 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-实例管理（manager 侧，增强版：Turso + 自愈）
+实例管理（manager 侧，增强版：数据自愈）
 
-- 实例清单存储到 Turso（优先）+ GitHub Releases（备份双写）
-- 实例配置存储到 Turso（优先）+ 账号仓库 Releases（备份双写）
+- 实例清单加密存储
 - 创建：选账号 → 同步fork → 建隧道 → 存配置 → 触发 worker
 - 关闭：取消 run → 删配置 → 删隧道
 - 查询 / 上报
-- 数据自愈：清单缺失/为空时自动从配置恢复
-- 全链路日志
+- ★ 数据自愈：
+  · ensure_instances_self_heal()：清单缺失/为空时，自动从各账号 fork 扫描重建
+  · worker_report 自愈：实例不存在时自动从 worker 配置创建
+  · save_instances 增强：旧数据备份到 .bak + 数量骤减保护（防并发覆盖丢数据）
 """
 import time
-import json
 import datetime
 
 import config
 import log
-from core import storage, crypto, ghapi, turso
+from core import storage
+from core import crypto
+from core import ghapi
 from manager import tunnels
 from manager import accounts
 
@@ -25,152 +27,48 @@ logger = log.setup_logger("instances")
 
 # ==================== 实例清单 ====================
 def load_instances(token=None):
-    """读取实例清单。优先 Turso，回退 Releases。"""
-    try:
-        if turso.is_available():
-            data = turso.get(turso.KEY_INSTANCES, default=None)
-            if data is not None:
-                logger.info(f"[instances] 从 Turso 加载 ({len(data)} 个)")
-                return data if isinstance(data, list) else []
-    except Exception as e:
-        logger.warning(f"[instances] Turso 加载失败，回退 Releases: {e}")
     data = storage.load_json_enc(config.ASSET_INSTANCES, token=token, default=[])
-    logger.info(f"[instances] 从 Releases 加载 ({len(data) if isinstance(data, list) else 0} 个)")
     return data if isinstance(data, list) else []
 
 
 def save_instances(instances, token=None):
     """
-    保存实例清单。Turso（主）+ Releases（备份双写）。
-    绝对禁止空数据保存。数量骤减保护。
+    保存实例清单（绝对保护版）：
+    绝对禁止空数据保存，不管什么情况。
+    数量骤减保护：新数据 < 旧数据一半 → 拒绝。
     """
+    tok = token or config.GH_TOKEN
+    # 绝对禁止空数据保存（防止GitHub API故障导致清单丢失）
     if not instances:
         logger.warning("[protect] 绝对禁止空数据覆盖实例清单")
         return False
     # 数量骤减保护
     try:
-        old = load_instances(token=token)
+        old = load_instances(token=tok)
         old_count = len(old)
         new_count = len(instances)
         if old_count > 2 and new_count < old_count / 2:
-            logger.warning(f"[protect] 拒绝数量骤减：{old_count}→{new_count}")
+            logger.warning(f"[protect] 拒绝数量骤减覆盖：{old_count}→{new_count}")
             return False
     except Exception:
         pass
-    tok = token or config.GH_TOKEN
-    # 写前备份到 Releases .bak
+    # 写前备份
     try:
         blob = storage.download_asset(config.ASSET_INSTANCES, token=tok)
         if blob:
             storage.upload_asset(f"{config.ASSET_INSTANCES}.bak", blob, token=tok)
     except Exception:
         pass
-    # 优先存 Turso
-    try:
-        if turso.is_available():
-            turso.put(turso.KEY_INSTANCES, instances)
-            logger.info(f"[instances] 已存入 Turso ({len(instances)} 个)")
-    except Exception as e:
-        logger.warning(f"[instances] Turso 保存失败: {e}")
-    # 同时存 Releases（备份双写）
     storage.save_json_enc(config.ASSET_INSTANCES, instances, token=tok)
     return True
-
-
-# ==================== 实例配置存储 ====================
-def _save_instance_config(account, inst_id, payload):
-    """保存实例配置。优先 Turso，同时备份到账号仓库 Releases。"""
-    # 存 Turso
-    try:
-        if turso.is_available():
-            turso.put(turso.inst_config_key(inst_id), payload)
-            logger.info(f"[config] 实例 {inst_id} 配置已存入 Turso")
-    except Exception as e:
-        logger.warning(f"[config] Turso 保存 {inst_id} 失败: {e}")
-    # 同时存账号仓库 Releases（备份，worker 从这里读取）
-    try:
-        repo = account["repo"]
-        token = account["token"]
-        asset_name = f"inst-{inst_id}.json.enc"
-        url = f"{ghapi.API_BASE}/repos/{repo}/releases/tags/{config.BACKUP_TAG}"
-        status, d = ghapi.gh_request("GET", url, token=token)
-        if status != 200:
-            ghapi.gh_request("POST", f"{ghapi.API_BASE}/repos/{repo}/releases", token=token,
-                             data={"tag_name": config.BACKUP_TAG, "name": "实例配置", "body": ""})
-            status, d = ghapi.gh_request("GET", url, token=token)
-        rel_id = d["id"]
-        for a in d.get("assets", []):
-            if a.get("name") == asset_name:
-                ghapi.gh_request("DELETE", f"{ghapi.API_BASE}/repos/{repo}/releases/assets/{a['id']}",
-                                 token=token)
-        enc = crypto.encrypt_bytes(json.dumps(payload, ensure_ascii=False).encode())
-        up_url = f"{ghapi.UPLOAD_BASE}/repos/{repo}/releases/{rel_id}/assets?name={asset_name}"
-        ghapi.gh_request("POST", up_url, token=token, data=enc,
-                         headers={"Content-Type": "application/octet-stream"})
-        logger.info(f"[config] 实例 {inst_id} 配置已备份到 Releases ({repo})")
-    except Exception as e:
-        logger.warning(f"[config] Releases 备份 {inst_id} 失败: {e}")
-
-
-def _load_instance_config(account, inst_id):
-    """读取实例配置。优先 Turso，回退 Releases。"""
-    # 优先 Turso
-    try:
-        if turso.is_available():
-            data = turso.get(turso.inst_config_key(inst_id), default=None)
-            if data is not None:
-                logger.info(f"[config] 从 Turso 读取 {inst_id} 配置")
-                return data
-    except Exception as e:
-        logger.warning(f"[config] Turso 读取 {inst_id} 失败: {e}")
-    # 回退到 Releases
-    try:
-        repo = account.get("repo") or config.REPO
-        token = account.get("token")
-        asset_name = f"inst-{inst_id}.json.enc"
-        url = f"{ghapi.API_BASE}/repos/{repo}/releases/tags/{config.BACKUP_TAG}"
-        status, d = ghapi.gh_request("GET", url, token=token)
-        if status != 200:
-            return None
-        for a in d.get("assets", []):
-            if a.get("name") == asset_name:
-                status2, blob = ghapi.gh_request("GET",
-                    f"{ghapi.API_BASE}/repos/{repo}/releases/assets/{a['id']}",
-                    token=token, raw=True,
-                    headers={"Accept": "application/octet-stream"})
-                if status2 == 200 and blob:
-                    try:
-                        return crypto.decrypt_json(blob)
-                    except Exception:
-                        return None
-    except Exception as e:
-        logger.warning(f"[config] Releases 读取 {inst_id} 失败: {e}")
-    return None
 
 
 # ==================== 实例清单自愈 ====================
 def _scan_worker_configs():
     """
-    扫描所有实例配置。优先 Turso，回退 Releases。
+    扫描所有账号 fork 仓库的 inst-*.json.enc，重建实例配置。
     返回 {inst_id: cfg}
     """
-    # 优先从 Turso 读取所有实例配置
-    try:
-        if turso.is_available():
-            all_configs = turso.get_all(turso.KEY_INST_CONFIG_PREFIX)
-            if all_configs:
-                logger.info(f"[heal] 从 Turso 扫描到 {len(all_configs)} 个实例配置")
-                result = {}
-                for key, cfg in all_configs.items():
-                    inst_id = key.replace(turso.KEY_INST_CONFIG_PREFIX, "")
-                    if inst_id and isinstance(cfg, dict):
-                        cfg.setdefault("account", "")
-                        cfg.setdefault("account_repo", "")
-                        result[inst_id] = cfg
-                return result
-    except Exception as e:
-        logger.warning(f"[heal] Turso 扫描失败，回退 Releases: {e}")
-    # 回退到 Releases 扫描
     result = {}
     for acc in accounts.load_accounts():
         repo = acc.get("repo") or config.REPO
@@ -197,19 +95,20 @@ def _scan_worker_configs():
                             pass
         except Exception as e:
             logger.warning(f"[heal] 扫描账号 {acc.get('name')} 失败: {e}")
-    logger.info(f"[heal] 从 Releases 扫描到 {len(result)} 个实例配置")
     return result
 
 
 def ensure_instances_self_heal(manager_token=None):
     """
     实例清单自愈（完整版）：
-    1. 清单为空 → 从配置全部重建
-    2. 清单不完整 → 只恢复缺失的
+    1. 清单为空 → 从配置文件全部重建
+    2. 清单不完整（缺少实例）→ 只恢复缺失的实例
     3. 清单完整 → 跳过
     """
     tok = manager_token or config.GH_TOKEN
     existing = load_instances(token=tok)
+
+    # 扫描所有配置文件
     cfgs = _scan_worker_configs()
 
     if not cfgs:
@@ -220,6 +119,7 @@ def ensure_instances_self_heal(manager_token=None):
         return 0
 
     if not existing:
+        # 清单为空，全部重建
         logger.warning("[heal] 实例清单为空/缺失，从配置文件全部重建...")
         instances = []
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -227,19 +127,27 @@ def ensure_instances_self_heal(manager_token=None):
             hostname = cfg.get("hostname") or f"{inst_id}.{config.BASE_DOMAIN}"
             mcp_hostname = cfg.get("mcp_hostname", "") or f"mcp-{hostname}"
             instances.append({
-                "id": inst_id, "hostname": hostname,
-                "account": cfg.get("account", ""), "account_repo": cfg.get("account_repo", ""),
-                "tunnel_id": cfg.get("tunnel_id", ""), "tunnel_token": cfg.get("tunnel_token", ""),
-                "mcp_hostname": mcp_hostname, "mcp_tunnel_id": cfg.get("mcp_tunnel_id", ""),
+                "id": inst_id,
+                "hostname": hostname,
+                "account": cfg.get("account", ""),
+                "account_repo": cfg.get("account_repo", ""),
+                "tunnel_id": cfg.get("tunnel_id", ""),
+                "tunnel_token": cfg.get("tunnel_token", ""),
+                "mcp_hostname": mcp_hostname,
+                "mcp_tunnel_id": cfg.get("mcp_tunnel_id", ""),
                 "mcp_url": f"https://{mcp_hostname}" if cfg.get("mcp_tunnel_id") else None,
-                "run_id": None, "status": "running", "url": f"https://{hostname}",
-                "closed": False, "created_at": now,
+                "run_id": None,
+                "status": "running",
+                "url": f"https://{hostname}",
+                "closed": False,
+                "created_at": now,
             })
         if save_instances(instances, token=tok):
             logger.info(f"[heal] 实例清单已全部重建，共 {len(instances)} 个实例")
             return len(instances)
         return 0
 
+    # 清单不为空，检查是否完整
     existing_ids = {i.get("id") for i in existing if not i.get("closed")}
     missing_ids = set(cfgs.keys()) - existing_ids
 
@@ -247,6 +155,7 @@ def ensure_instances_self_heal(manager_token=None):
         logger.info(f"[heal] 实例清单正常且完整（{len(existing)} 个），无需自愈")
         return 0
 
+    # 有缺失的实例，只恢复缺失的（不碰已有的）
     logger.warning(f"[heal] 实例清单缺少 {len(missing_ids)} 个实例: {missing_ids}")
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     for inst_id in missing_ids:
@@ -254,13 +163,20 @@ def ensure_instances_self_heal(manager_token=None):
         hostname = cfg.get("hostname") or f"{inst_id}.{config.BASE_DOMAIN}"
         mcp_hostname = cfg.get("mcp_hostname", "") or f"mcp-{hostname}"
         existing.append({
-            "id": inst_id, "hostname": hostname,
-            "account": cfg.get("account", ""), "account_repo": cfg.get("account_repo", ""),
-            "tunnel_id": cfg.get("tunnel_id", ""), "tunnel_token": cfg.get("tunnel_token", ""),
-            "mcp_hostname": mcp_hostname, "mcp_tunnel_id": cfg.get("mcp_tunnel_id", ""),
+            "id": inst_id,
+            "hostname": hostname,
+            "account": cfg.get("account", ""),
+            "account_repo": cfg.get("account_repo", ""),
+            "tunnel_id": cfg.get("tunnel_id", ""),
+            "tunnel_token": cfg.get("tunnel_token", ""),
+            "mcp_hostname": mcp_hostname,
+            "mcp_tunnel_id": cfg.get("mcp_tunnel_id", ""),
             "mcp_url": f"https://{mcp_hostname}" if cfg.get("mcp_tunnel_id") else None,
-            "run_id": None, "status": "running", "url": f"https://{hostname}",
-            "closed": False, "created_at": now,
+            "run_id": None,
+            "status": "running",
+            "url": f"https://{hostname}",
+            "closed": False,
+            "created_at": now,
         })
         logger.info(f"[heal] 恢复缺失实例: {inst_id}")
 
@@ -268,8 +184,9 @@ def ensure_instances_self_heal(manager_token=None):
         logger.info(f"[heal] 已恢复 {len(missing_ids)} 个缺失实例，清单共 {len(existing)} 个")
     return len(missing_ids)
 
-
 # ==================== 账号仓库操作 ====================
+
+
 def _next_inst_id(instances):
     """生成下一个实例ID"""
     nums = []
@@ -281,16 +198,47 @@ def _next_inst_id(instances):
     return f"inst{max(nums) + 1 if nums else 1}"
 
 
+def _account_repo_url(repo, path):
+    return f"{ghapi.API_BASE}/repos/{repo}{path}"
+
+
+def _save_instance_config(account, inst_id, payload):
+    """把实例配置（含 tunnel token）加密存到账号仓库 Releases"""
+    repo = account["repo"]
+    token = account["token"]
+    asset_name = f"inst-{inst_id}.json.enc"
+    url = _account_repo_url(repo, f"/releases/tags/{config.BACKUP_TAG}")
+    status, d = ghapi.gh_request("GET", url, token=token)
+    if status != 200:
+        ghapi.gh_request("POST", _account_repo_url(repo, "/releases"), token=token,
+                         data={"tag_name": config.BACKUP_TAG, "name": "实例配置", "body": ""})
+        status, d = ghapi.gh_request("GET", url, token=token)
+    rel_id = d["id"]
+    for a in d.get("assets", []):
+        if a.get("name") == asset_name:
+            ghapi.gh_request("DELETE", _account_repo_url(repo, f"/releases/assets/{a['id']}"),
+                             token=token)
+    enc = crypto.encrypt_bytes(json_dumps(payload).encode())
+    up_url = f"{ghapi.UPLOAD_BASE}/repos/{repo}/releases/{rel_id}/assets?name={asset_name}"
+    ghapi.gh_request("POST", up_url, token=token, data=enc,
+                     headers={"Content-Type": "application/octet-stream"})
+
+
+def json_dumps(obj):
+    import json
+    return json.dumps(obj, ensure_ascii=False)
+
+
 def _trigger_worker(account, inst_id):
     """用账号 token 触发该账号仓库的 worker workflow"""
     repo = account["repo"]
-    url = f"{ghapi.API_BASE}/repos/{repo}/actions/workflows/{config.WORKER_WORKFLOW}/dispatches"
+    url = _account_repo_url(repo, f"/actions/workflows/{config.WORKER_WORKFLOW}/dispatches")
     status, d = ghapi.gh_request("POST", url, token=account["token"],
                                  data={"ref": "main", "inputs": {"INSTANCE_ID": inst_id}})
     if status not in (200, 204):
         raise RuntimeError(f"触发 worker 失败: {status} {d}")
     time.sleep(4)
-    runs_url = f"{ghapi.API_BASE}/repos/{repo}/actions/runs?per_page=1"
+    runs_url = _account_repo_url(repo, "/actions/runs?per_page=1")
     status, d = ghapi.gh_request("GET", runs_url, token=account["token"])
     run_id = None
     if status == 200 and d.get("workflow_runs"):
@@ -302,7 +250,7 @@ def _cancel_worker(account, run_id):
     if not run_id:
         return
     repo = account["repo"]
-    url = f"{ghapi.API_BASE}/repos/{repo}/actions/runs/{run_id}/cancel"
+    url = _account_repo_url(repo, f"/actions/runs/{run_id}/cancel")
     ghapi.gh_request("POST", url, token=account["token"])
 
 
@@ -322,6 +270,7 @@ def create_instance(manager_token=None, account_name=None):
         account, running = sel
 
     instances = load_instances(token=manager_token)
+    # 防止API故障导致清单为空时创建实例（会导致数量骤减保护拒绝）
     if not instances:
         time.sleep(3)
         instances = load_instances(token=manager_token)
@@ -341,6 +290,7 @@ def create_instance(manager_token=None, account_name=None):
     except Exception as e:
         return {"ok": False, "error": f"创建隧道失败: {e}"}
 
+    # 创建 MCP 专用隧道（子域名加 mcp 前缀）
     mcp_hostname = f"mcp-{hostname}"
     mcp_tunnel_id, mcp_tunnel_token = "", ""
     try:
@@ -351,11 +301,15 @@ def create_instance(manager_token=None, account_name=None):
 
     try:
         _save_instance_config(account, inst_id, {
-            "inst_id": inst_id, "hostname": hostname,
-            "tunnel_token": tunnel_token, "tunnel_id": tunnel_id,
-            "mcp_hostname": mcp_hostname, "mcp_tunnel_token": mcp_tunnel_token,
+            "inst_id": inst_id,
+            "hostname": hostname,
+            "tunnel_token": tunnel_token,
+            "tunnel_id": tunnel_id,
+            "mcp_hostname": mcp_hostname,
+            "mcp_tunnel_token": mcp_tunnel_token,
             "mcp_tunnel_id": mcp_tunnel_id,
-            "account": account["name"], "account_repo": account["repo"],
+            "account": account["name"],
+            "account_repo": account["repo"],
         })
     except Exception as e:
         tunnels.delete_tunnel(tunnel_id, hostname)
@@ -368,12 +322,19 @@ def create_instance(manager_token=None, account_name=None):
         return {"ok": False, "error": f"触发 worker 失败: {e}"}
 
     inst = {
-        "id": inst_id, "hostname": hostname,
-        "account": account["name"], "account_repo": account["repo"],
-        "tunnel_id": tunnel_id, "mcp_hostname": mcp_hostname, "mcp_tunnel_id": mcp_tunnel_id,
-        "run_id": run_id, "status": "starting", "url": f"https://{hostname}",
+        "id": inst_id,
+        "hostname": hostname,
+        "account": account["name"],
+        "account_repo": account["repo"],
+        "tunnel_id": tunnel_id,
+        "mcp_hostname": mcp_hostname,
+        "mcp_tunnel_id": mcp_tunnel_id,
+        "run_id": run_id,
+        "status": "starting",
+        "url": f"https://{hostname}",
         "mcp_url": f"https://{mcp_hostname}" if mcp_tunnel_token else None,
-        "closed": False, "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "closed": False,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     instances.append(inst)
     save_instances(instances, token=manager_token)
@@ -392,29 +353,23 @@ def close_instance(inst_id, manager_token=None):
                     if a["name"] == inst.get("account")), None)
     if account:
         _cancel_worker(account, inst.get("run_id"))
-        # 从 Releases 删除配置文件
         try:
             asset_name = f"inst-{inst_id}.json.enc"
-            url = f"{ghapi.API_BASE}/repos/{account['repo']}/releases/tags/{config.BACKUP_TAG}"
+            url = _account_repo_url(account["repo"], f"/releases/tags/{config.BACKUP_TAG}")
             status, d = ghapi.gh_request("GET", url, token=account["token"])
             if status == 200:
                 for a in d.get("assets", []):
                     if a.get("name") == asset_name:
                         ghapi.gh_request("DELETE",
-                                        f"{ghapi.API_BASE}/repos/{account['repo']}/releases/assets/{a['id']}",
+                                        _account_repo_url(account["repo"], f"/releases/assets/{a['id']}"),
                                         token=account["token"])
         except Exception:
             pass
-    # 从 Turso 删除配置
-    try:
-        if turso.is_available():
-            turso.delete(turso.inst_config_key(inst_id))
-    except Exception:
-        pass
     try:
         tunnels.delete_tunnel(inst.get("tunnel_id"), inst.get("hostname"))
     except Exception:
         pass
+    # 删除 MCP 隧道
     if inst.get("mcp_tunnel_id"):
         try:
             tunnels.delete_tunnel(inst["mcp_tunnel_id"], inst.get("mcp_hostname", f"mcp-{inst.get('hostname','')}"))
@@ -439,7 +394,10 @@ def get_instance(inst_id, manager_token=None):
 
 
 def worker_report(inst_id, url, manager_token=None):
-    """worker 上报 URL 和状态（含自愈）"""
+    """
+    worker 启动后上报 URL 和状态（含自愈）：
+    若实例不存在，自动从账号 fork 的 inst-*.json.enc 创建。
+    """
     tok = manager_token or config.GH_TOKEN
     instances = load_instances(token=tok)
     inst = next((i for i in instances if i["id"] == inst_id), None)
@@ -449,17 +407,22 @@ def worker_report(inst_id, url, manager_token=None):
         inst["last_seen"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         save_instances(instances, token=tok)
         return {"ok": True}
-    # 自愈：实例不存在，从配置扫描创建
+    # 自愈：实例不存在，从账号 fork 扫描创建
     logger.warning(f"[heal] worker {inst_id} 上报但清单中不存在，尝试自愈创建")
     cfgs = _scan_worker_configs()
     cfg = cfgs.get(inst_id)
     if cfg:
         hostname = cfg.get("hostname") or url.replace("https://", "")
         new_inst = {
-            "id": inst_id, "hostname": hostname,
-            "account": cfg.get("account", ""), "account_repo": cfg.get("account_repo", ""),
-            "tunnel_id": cfg.get("tunnel_id", ""), "run_id": None,
-            "status": "running", "url": url, "closed": False,
+            "id": inst_id,
+            "hostname": hostname,
+            "account": cfg.get("account", ""),
+            "account_repo": cfg.get("account_repo", ""),
+            "tunnel_id": cfg.get("tunnel_id", ""),
+            "run_id": None,
+            "status": "running",
+            "url": url,
+            "closed": False,
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "last_seen": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
@@ -468,15 +431,39 @@ def worker_report(inst_id, url, manager_token=None):
         logger.info(f"[heal] 实例 {inst_id} 已自愈创建")
     return {"ok": True}
 
-
 # ==================== MCP 隧道自动补创建 ====================
+def _load_instance_config(account, inst_id):
+    """从账号仓库读取实例配置文件"""
+    repo = account.get('repo') or config.REPO
+    token = account.get('token')
+    asset_name = f'inst-{inst_id}.json.enc'
+    url = _account_repo_url(repo, f'/releases/tags/{config.BACKUP_TAG}')
+    status, d = ghapi.gh_request('GET', url, token=token)
+    if status != 200:
+        return None
+    for a in d.get('assets', []):
+        if a.get('name') == asset_name:
+            from core import crypto
+            status2, blob = ghapi.gh_request('GET',
+                f'{ghapi.API_BASE}/repos/{repo}/releases/assets/{a["id"]}',
+                token=token, raw=True,
+                headers={'Accept': 'application/octet-stream'})
+            if status2 == 200 and blob:
+                try:
+                    return crypto.decrypt_json(blob)
+                except Exception:
+                    return None
+    return None
+
+
 def ensure_mcp_tunnels(manager_token=None):
     """
-    自动确保每个实例有 MCP 隧道。四级策略（零中断）。
-    1. 清单已有 mcp_tunnel_id → 跳过
-    2. 从配置恢复 MCP 信息 → 更新清单
-    3. 创建新隧道 → 保存到配置和清单
-    4. 409 → 跳过（不删除已有隧道）
+    自动确保每个实例有 MCP 隧道。
+    策略（优先级从高到低，零中断）：
+    1. 实例清单已有 mcp_tunnel_id → 跳过
+    2. 从配置文件恢复 MCP 信息 → 更新实例清单（不碰已有隧道）
+    3. 创建新隧道 → 保存到配置文件和实例清单
+    4. 创建时409（隧道已存在但无token）→ 删除重建（等待10秒避免409）
     """
     tok = manager_token or config.GH_TOKEN
     instances_list = load_instances(token=tok)
@@ -486,6 +473,7 @@ def ensure_mcp_tunnels(manager_token=None):
             continue
         if inst.get('mcp_tunnel_id'):
             continue
+
         hostname = inst.get('hostname', '')
         if not hostname:
             continue
@@ -501,15 +489,17 @@ def ensure_mcp_tunnels(manager_token=None):
                 inst['mcp_tunnel_id'] = cfg['mcp_tunnel_id']
                 inst['mcp_url'] = f'https://{inst["mcp_hostname"]}'
                 changed = True
-                logger.info(f'[mcp-heal] 从配置恢复 {inst["id"]} MCP: {inst["mcp_hostname"]}')
+                logger.info(f'[mcp-heal] 从配置文件恢复 {inst["id"]} MCP 信息: {inst["mcp_hostname"]}')
                 continue
 
         # 策略3: 创建新隧道
         try:
             mcp_tid, mcp_ttoken = tunnels.create_mcp_tunnel(mcp_hostname)
         except Exception as e:
+            # 409 = 隧道已存在，说明之前创建过，配置文件应该有token
+            # 不删除重建（会导致DNS丢失+服务中断），直接跳过
             if 'already have a tunnel' in str(e) or '1013' in str(e):
-                logger.info(f'[mcp-heal] {inst["id"]} MCP 隧道已存在，跳过')
+                logger.info(f'[mcp-heal] {inst["id"]} MCP 隧道已存在，跳过（worker 从配置文件读取 token）')
                 continue
             else:
                 logger.warning(f'[mcp-heal] {inst["id"]} 创建失败: {e}')
@@ -520,6 +510,7 @@ def ensure_mcp_tunnels(manager_token=None):
         inst['mcp_url'] = f'https://{mcp_hostname}'
         logger.info(f'[mcp-heal] 为 {inst["id"]} 创建 MCP 隧道: {mcp_hostname}')
 
+        # 保存到配置文件（先读取现有配置，只更新MCP字段，不覆盖tunnel_token等）
         if account:
             try:
                 existing = _load_instance_config(account, inst['id']) or {}

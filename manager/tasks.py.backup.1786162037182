@@ -2,10 +2,9 @@
 """
 任务持久化与执行（manager 侧）
 
-- 任务持久化到 Turso（优先）+ GitHub Releases（备份双写）
+- 任务持久化到 Releases（重启后恢复未完成）
 - 后台串行执行器 + 自动重试（指数退避）
 - 任务去重 / 超时 / 历史清理
-- 全链路日志
 """
 import time
 import uuid
@@ -13,7 +12,7 @@ import threading
 
 import config
 import log
-from core import storage, turso
+from core import storage
 
 logger = log.setup_logger("tasks")
 
@@ -27,27 +26,11 @@ _lock = threading.Lock()
 
 
 def load_tasks():
-    """加载任务列表。优先 Turso，回退 Releases。"""
-    try:
-        if turso.is_available():
-            data = turso.get(turso.KEY_TASKS, default=None)
-            if data is not None:
-                logger.info(f"[task] 从 Turso 加载 ({len(data)} 个)")
-                return data if isinstance(data, list) else []
-    except Exception as e:
-        logger.warning(f"[task] Turso 加载失败，回退 Releases: {e}")
-    data = storage.load_json_enc(config.ASSET_TASKS, default=[])
-    logger.info(f"[task] 从 Releases 加载 ({len(data) if isinstance(data, list) else 0} 个)")
-    return data if isinstance(data, list) else []
+    tasks = storage.load_json_enc(config.ASSET_TASKS, default=[])
+    return tasks if isinstance(tasks, list) else []
 
 
 def save_tasks(tasks):
-    """保存任务列表。Turso（主）+ Releases（备份双写）。"""
-    try:
-        if turso.is_available():
-            turso.put(turso.KEY_TASKS, tasks)
-    except Exception as e:
-        logger.warning(f"[task] Turso 保存失败: {e}")
     storage.save_json_enc_protected(config.ASSET_TASKS, tasks)
 
 

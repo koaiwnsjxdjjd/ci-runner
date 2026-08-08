@@ -1,16 +1,19 @@
-name: manager
+name: worker
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 */6 * * *'
+    inputs:
+      INSTANCE_ID:
+        description: '工作实例 ID（由管理实例分配）'
+        required: true
+        type: string
 
 concurrency:
-  group: manager
+  group: worker-${{ github.event.inputs.INSTANCE_ID }}
   cancel-in-progress: true
 
 jobs:
-  manager:
+  worker:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -36,24 +39,17 @@ jobs:
           curl -sL -o /tmp/cf.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i /tmp/cf.deb || sudo apt-get install -y -f
 
-      - name: Run manager
+      - name: Run worker
         env:
-          INSTANCE_ROLE: manager
+          INSTANCE_ROLE: worker
+          INSTANCE_ID: ${{ github.event.inputs.INSTANCE_ID }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           DEMO_KEY: ${{ secrets.DEMO_KEY }}
           EXEC_TOKEN: ${{ secrets.EXEC_TOKEN }}
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-          TUNNEL_TOKEN: ${{ secrets.TUNNEL_TOKEN }}
-          TUNNEL_HOST: "ghvps2.kekeke.cc.cd"
-          CF_EMAIL: ${{ secrets.CF_EMAIL }}
-          CF_API_KEY: ${{ secrets.CF_API_KEY }}
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
-          BASE_DOMAIN: "kekeke.cc.cd"
-          MANAGER_WORKFLOW: "manager.yml"
-          WORKER_WORKFLOW: "worker.yml"
+          MANAGER_HOST: "ghvps2.kekeke.cc.cd"
           PRE_WAKE_SECONDS: "21300"
+          WORKER_WORKFLOW: "worker.yml"
           CURRENT_SHA: ${{ github.sha }}
+          BASE_DOMAIN: "kekeke.cc.cd"
         run: python3 app.py

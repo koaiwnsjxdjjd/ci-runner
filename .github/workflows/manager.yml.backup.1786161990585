@@ -43,8 +43,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           DEMO_KEY: ${{ secrets.DEMO_KEY }}
           EXEC_TOKEN: ${{ secrets.EXEC_TOKEN }}
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
           TUNNEL_TOKEN: ${{ secrets.TUNNEL_TOKEN }}
           TUNNEL_HOST: "ghvps2.kekeke.cc.cd"
           CF_EMAIL: ${{ secrets.CF_EMAIL }}
