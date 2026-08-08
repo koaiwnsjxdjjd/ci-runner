@@ -19,12 +19,31 @@ def list_instances():
 
 
 def create_instance():
-    """创建实例"""
+    """创建实例（支持指定账号）"""
+    d = api.get("/api/accounts")
+    accounts = d.get("accounts", [])
+    if not accounts:
+        print("  ❌ 没有可用账号，请先添加账号")
+        return
+    print("  可用账号:")
+    for idx, a in enumerate(accounts):
+        print(f"    [{idx}] {a['name']} ({a.get('repo','')})")
+    print(f"    [auto] 自动选择最优账号")
+    sel = input("  选择账号（序号/auto）: ").strip().lower() or "auto"
+    payload = {}
+    if sel != "auto":
+        try:
+            idx = int(sel)
+            payload = {"account": accounts[idx]["name"]}
+        except Exception:
+            print("  无效选择，使用自动选择")
     print("  正在创建新实例（自动配置隧道+启动）...")
-    d = api.post("/api/instances")
+    d = api.post("/api/instances", payload)
     if d.get("ok"):
         inst = d.get("instance", {})
         print(f"  ✅ 创建成功: {inst.get('id')} → https://{inst.get('hostname')}")
+        if inst.get("mcp_url"):
+            print(f"     MCP: {inst.get('mcp_url')}")
     else:
         print(f"  ❌ 失败: {d.get('error')}")
 
