@@ -270,6 +270,12 @@ def create_instance(manager_token=None, account_name=None):
         account, running = sel
 
     instances = load_instances(token=manager_token)
+    # 防止API故障导致清单为空时创建实例（会导致数量骤减保护拒绝）
+    if not instances:
+        time.sleep(3)
+        instances = load_instances(token=manager_token)
+        if not instances:
+            return {"ok": False, "error": "实例清单加载失败（可能是API故障），请稍后重试"}
     inst_id = _next_inst_id(instances)
     hostname = f"{inst_id}.{config.BASE_DOMAIN}"
 
