@@ -77,21 +77,43 @@ def _find_asset(release, name):
 
 # ==================== 单文件上传/下载 ====================
 def upload_asset(name, data_bytes, token=None, repo=None):
-    """上传资产（加密），返回 (size, status)。"""
+    """上传资产（加密），返回 (size, status)。
+    安全上传：先备份旧数据→删除→上传→失败则恢复旧数据。
+    """
     tok = token or config.GH_TOKEN
     repo = repo or config.REPO
     rel_id = ensure_release(token=tok, repo=repo)
-    # 删除同名旧资产
     rel = get_release(token=tok, repo=repo)
     old = _find_asset(rel, name)
+    # 先备份旧资产数据
+    old_backup = None
     if old:
+        try:
+            s, blob = ghapi.gh_request("GET",
+                f"{ghapi.API_BASE}/repos/{repo}/releases/assets/{old['id']}",
+                token=tok, raw=True,
+                headers={"Accept": "application/octet-stream"}, timeout=30)
+            if s == 200 and blob:
+                old_backup = blob
+        except Exception:
+            pass
+        # 删除旧资产
         ghapi.gh_request("DELETE",
                          f"{ghapi.API_BASE}/repos/{repo}/releases/assets/{old['id']}",
                          token=tok, timeout=30)
+    # 上传新资产
     url = f"{ghapi.UPLOAD_BASE}/repos/{repo}/releases/{rel_id}/assets?name={name}"
     status, _ = ghapi.gh_request(
         "POST", url, token=tok, data=data_bytes,
         headers={"Content-Type": "application/octet-stream"}, timeout=180)
+    # 上传失败：从备份恢复旧数据（避免数据丢失）
+    if status not in (200, 201) and old_backup:
+        logger.warning(f"[storage] 上传 {name} 失败({status})，恢复旧数据")
+        try:
+            ghapi.gh_request("POST", url, token=tok, data=old_backup,
+                headers={"Content-Type": "application/octet-stream"}, timeout=180)
+        except Exception as e:
+            logger.error(f"[storage] 恢复旧数据也失败: {e}")
     return len(data_bytes), status
 
 

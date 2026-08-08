@@ -351,7 +351,10 @@ def _start_tunnel():
 
 # ==================== 数据自愈循环 ====================
 def _heal_loop():
-    """周期性自愈：实例清单重建 + MCP 隧道自动补创建"""
+    """周期性自愈：实例清单重建 + MCP 隧道自动补创建
+    清单为空时先重试3次（防GitHub API临时故障），确认空才重建。
+    """
+    empty_retries = 0
     while True:
         time.sleep(120)
         try:
@@ -359,8 +362,15 @@ def _heal_loop():
                 continue
             insts = instances.list_instances()
             if not insts:
-                logger.warning("[heal] 实例清单为空，触发自愈重建")
-                instances.ensure_instances_self_heal()
+                empty_retries += 1
+                if empty_retries >= 3:
+                    logger.warning("[heal] 实例清单连续3次为空，触发自愈重建")
+                    instances.ensure_instances_self_heal()
+                    empty_retries = 0
+                else:
+                    logger.warning(f"[heal] 实例清单为空（第{empty_retries}次），可能是API故障，等待重试")
+            else:
+                empty_retries = 0
             # 自动为缺少 MCP 隧道的实例补创建
             instances.ensure_mcp_tunnels()
         except Exception as e:
