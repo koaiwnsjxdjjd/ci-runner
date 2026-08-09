@@ -121,15 +121,10 @@ def upload_asset(name, data_bytes, token=None, repo=None):
         logger.info(f"[storage] 上传 {name} OK ({len(data_bytes)} bytes) -> {repo}")
     else:
         logger.error(f"[storage] 上传 {name} 失败({status}) -> {repo}")
-    # 上传失败：从备份恢复旧数据
+    # 上传失败：不恢复旧数据（避免旧版本覆盖新版本）
+    # 下次快照会重新上传新数据
     if status not in (200, 201) and old_backup:
-        logger.warning(f"[storage] 上传 {name} 失败({status})，恢复旧数据")
-        try:
-            ghapi.gh_request("POST", url, token=tok, data=old_backup,
-                headers={"Content-Type": "application/octet-stream"}, timeout=180)
-            logger.info(f"[storage] 恢复旧 {name} 成功")
-        except Exception as e:
-            logger.error(f"[storage] 恢复旧数据也失败: {e}")
+        logger.warning(f"[storage] 上传 {name} 失败({status})，下次快照重试")
     return len(data_bytes), status
 
 

@@ -73,7 +73,7 @@ class McpManager:
             if blob:
                 logger.info(f"[mcp] 依赖包下载完成（{len(blob)} 字节），解压中...")
                 with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
-                    tar.extractall(path=MCP_SERVER_DIR, filter="data")
+                    tar.extractall(path=MCP_SERVER_DIR, filter="tar")
                 logger.info(f"[mcp] 预编译依赖已恢复（{len(blob)} 字节）")
                 if os.path.isdir(node_modules):
                     download_ok = True

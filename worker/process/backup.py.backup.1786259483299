@@ -1,18 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-进程文件快照与备份（生产级）
+进程文件快照与备份（单一职责）
 
 - 把进程 cwd 下的项目文件复制到 processes/<name>/app/
 - 支持排除可重建目录（node_modules/.git 等）
-- 大小限制保护
-- 原子打包（先复制到临时目录，完成后替换）
-- 全链路日志（记录跳过/失败的文件）
-- 解包保留文件权限（filter="tar"）
+- 大小限制保护（防止超大项目拖垮备份）
 """
 import os
-import io
 import shutil
-import tarfile
 
 import config
 import log
@@ -40,7 +35,6 @@ def _clear_dir(path):
 def backup_process_files(cfg):
     """
     备份单个进程的项目文件。
-    原子操作：先复制到临时目录，完成后替换目标目录。
     返回 (ok, size_mb, cfg)。
     """
     cwd = cfg.get("cwd") or ""
@@ -51,68 +45,35 @@ def backup_process_files(cfg):
         return False, 0, cfg
 
     dest = os.path.join(pconfig.proc_dir(), name, "app")
-    tmp_dest = os.path.join(pconfig.proc_dir(), name, "app.tmp")
-    os.makedirs(tmp_dest, exist_ok=True)
-    _clear_dir(tmp_dest)
+    os.makedirs(dest, exist_ok=True)
+    _clear_dir(dest)
 
     exclude = set(cfg.get("exclude") or pconfig.DEFAULT_EXCLUDE)
+    # 关键：排除持久化目录本身（防止 cwd 含 processes 时无限递归复制）
     exclude.add(os.path.basename(pconfig.proc_dir().rstrip("/")))
     if "processes" in cwd.split(os.sep):
         exclude.add("processes")
-
-    count = 0
-    skipped = 0
-    for root, dirs, files in os.walk(cwd):
-        rel = os.path.relpath(root, cwd)
-        dirs[:] = [d for d in dirs if d not in exclude and rel not in exclude]
-        for d in dirs:
-            os.makedirs(os.path.join(tmp_dest, rel, d), exist_ok=True)
-        for f in files:
-            if rel in exclude:
-                continue
-            s = os.path.join(root, f)
-            d = os.path.join(tmp_dest, rel, f)
-            try:
-                os.makedirs(os.path.dirname(d), exist_ok=True)
-                shutil.copy2(s, d)
-                count += 1
-            except Exception as e:
-                skipped += 1
-                if skipped <= 5:
-                    logger.warning(f"[backup] {name} 跳过文件 {f}: {e}")
-
-    size_mb = utils.dir_size_mb(tmp_dest)
+    count = utils.copy_tree(cwd, dest, exclude)
+    size_mb = utils.dir_size_mb(dest)
 
     if size_mb > config.PROC_MAX_BACKUP_MB:
         logger.warning(f"[backup] {name} 备份过大({size_mb:.1f}MB)，跳过文件备份")
-        shutil.rmtree(tmp_dest, ignore_errors=True)
+        shutil.rmtree(dest, ignore_errors=True)
         os.makedirs(dest, exist_ok=True)
         cfg["files_backed"] = False
         cfg["files_count"] = 0
     else:
-        # 原子替换：删除旧目录，重命名临时目录
-        if os.path.isdir(dest):
-            shutil.rmtree(dest, ignore_errors=True)
-        try:
-            os.rename(tmp_dest, dest)
-        except OSError:
-            # 跨文件系统 rename 失败，回退到 copy + rmtree
-            os.makedirs(dest, exist_ok=True)
-            _clear_dir(dest)
-            utils.copy_tree(tmp_dest, dest, set())
-            shutil.rmtree(tmp_dest, ignore_errors=True)
         cfg["files_backed"] = True
         cfg["files_count"] = count
         cfg["size_mb"] = round(size_mb, 2)
-        logger.info(f"[backup] {name} 备份完成: {count} 个文件, {size_mb:.1f}MB"
-                    f"{f', 跳过 {skipped} 个' if skipped else ''}")
-
     pconfig.save_proc_config(cfg)
     return True, size_mb, cfg
 
 
 def pack_processes_tar():
-    """把 processes 目录打包为 gz 字节流"""
+    """把 processes 目录打包为 gz 字节流（独立上传用）"""
+    import io
+    import tarfile
     if not os.path.isdir(pconfig.proc_dir()):
         return None
     buf = io.BytesIO()
@@ -122,19 +83,14 @@ def pack_processes_tar():
 
 
 def unpack_processes_tar(data):
-    """从字节流解包 processes 到 files 目录。保留文件权限。"""
+    """从字节流解包 processes 到 files 目录"""
+    import io
+    import tarfile
     if not data:
         return False
     try:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-            # filter="tar" 保留文件权限（执行权限、读写权限等）
-            # filter="data" 会丢弃权限导致恢复的二进制无法执行
-            try:
-                tar.extractall(path=config.FILES_DIR, filter="tar")
-            except TypeError:
-                # Python < 3.12 不支持 filter 参数
-                tar.extractall(path=config.FILES_DIR)
-        logger.info("[backup] 进程快照解包完成（保留权限）")
+            tar.extractall(path=config.FILES_DIR, filter="data")
         return True
     except Exception as e:
         logger.error(f"[backup] 进程快照解包失败: {e}")
