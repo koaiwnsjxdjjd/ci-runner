@@ -4,15 +4,6 @@ from cli.common import config
 from cli.mgr import ops
 
 
-def _input(prompt):
-    """带取消的输入。空输入或Ctrl+C返回None。"""
-    try:
-        val = input(prompt).strip()
-        return val if val else None
-    except (KeyboardInterrupt, EOFError):
-        return None
-
-
 def main_menu():
     print("\n" + "=" * 54)
     print("  ghbox GitHub Actions 云端实例管理")
@@ -26,35 +17,8 @@ def main_menu():
     print("  [6] 添加账号")
     print("  [7] 任务队列")
     print("  [8] 查看服务器日志")
-    print("  [9] Turso 管理")
     print("  [0] 退出")
-    return _input("\n  请选择: ")
-
-
-def turso_menu():
-    """Turso 管理子菜单"""
-    while True:
-        print("\n" + "-" * 40)
-        print("  Turso 云数据库管理")
-        print("-" * 40)
-        print("  [1] 查看账号列表")
-        print("  [2] 添加 Turso 账号")
-        print("  [3] 删除 Turso 账号")
-        print("  [4] 测试连接")
-        print("  [0] 返回主菜单")
-        choice = _input("\n  请选择: ")
-        if choice == "1":
-            ops.list_turso_accounts()
-        elif choice == "2":
-            ops.add_turso_account()
-        elif choice == "3":
-            ops.remove_turso_account()
-        elif choice == "4":
-            ops.test_turso()
-        elif choice == "0" or choice is None:
-            break
-        else:
-            print("  无效选择")
+    return input("\n  请选择: ").strip()
 
 
 def run_menu():
@@ -78,9 +42,7 @@ def run_menu():
                 ops.list_tasks()
             elif choice == "8":
                 ops.view_logs()
-            elif choice == "9":
-                turso_menu()
-            elif choice == "0" or choice is None:
+            elif choice == "0":
                 print("  再见！")
                 break
             else:
