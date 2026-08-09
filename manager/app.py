@@ -29,6 +29,7 @@ from manager import instances
 from manager import monitor
 from manager import guardian as guardian_mod
 from manager import tunnels
+from manager import turso_pool
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.urandom(24).hex()
@@ -331,6 +332,56 @@ def api_worker_leader():
     is_leader = bool(hb and hb.get("job_id") == job_id)
     return jsonify(ok=True, is_leader=is_leader, current=hb)
 
+# ==================== Turso 管理 API ====================
+@app.route("/api/turso/status")
+@require_auth
+def api_turso_status():
+    """返回所有Turso账号状态+额度"""
+    return jsonify(ok=True, accounts=turso_pool.get_status())
+
+
+@app.route("/api/turso/assign")
+@require_auth
+def api_turso_assign():
+    """为实例分配Turso账号（选余量最大的）"""
+    inst_id = request.args.get("inst_id", "")
+    if not inst_id:
+        return jsonify(ok=False, error="inst_id 必填"), 400
+    acct = turso_pool.assign_account(inst_id)
+    if acct:
+        return jsonify(ok=True, account={
+            "name": acct.get("name", ""),
+            "url": acct.get("url", ""),
+            "token": acct.get("token", ""),
+        })
+    return jsonify(ok=False, error="无可用Turso账号（额度不足或全部unhealthy）"), 503
+
+
+@app.route("/api/turso/report", methods=["POST"])
+@require_auth
+def api_turso_report():
+    """实例上报存储状态"""
+    data = request_get_json()
+    inst_id = data.get("inst_id", "")
+    backup_type = data.get("type", "")
+    size = data.get("size", 0)
+    account_name = data.get("account")
+    status = data.get("status", "ok")
+    version = data.get("version")
+    error = data.get("error", "")
+    if not inst_id or not backup_type:
+        return jsonify(ok=False, error="inst_id和type必填"), 400
+    turso_pool.report(inst_id, backup_type, size, account_name, status, version, error)
+    return jsonify(ok=True)
+
+
+@app.route("/api/turso/config")
+@require_auth
+def api_turso_config():
+    """返回Turso全局配置（账号列表+额度状态+指令）"""
+    return jsonify(ok=True, **turso_pool.get_config())
+
+
 
 # ==================== 隧道 ====================
 def _start_tunnel():
@@ -454,6 +505,7 @@ def run():
             tasks.recover_pending()
             tasks.start_worker()
             monitor.start_monitors()
+            turso_pool.init()
             logger.info("[lock] follower 升级为 leader，启动隧道+自愈+MCP补创建+任务+监控")
         threading.Thread(target=leader.follower_loop,
                          args=(_on_promote,), daemon=True).start()

@@ -1,21 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-数据/文件持久化（生产级，Turso优先 + Releases降级 + 版本号比较）
+数据/文件持久化（生产级，Turso优先 + Releases备用）
 
-恢复策略：
-  1. 查询Turso和Releases的版本号（updated_at时间戳）
-  2. 选版本号最大的（最新的）
-  3. 如果最新的不可用 → 用次选
-  4. 如果都不可用 → 报详细错误
-  5. 恢复后如果数据在Releases中 → 后台异步上传到Turso
-
-备份策略：
-  1. 优先Turso（put_blob）
-  2. Turso失败3次 → 降级Releases（upload_asset_chunked）
-  3. 上报存储结果
-  4. 用sudo tar打包（避免权限不足）
-
-日志：全链路详细日志（类型/大小/目标/耗时/版本号/错误）
+- SQLite 单连接 + 读写锁
+- 数据库与 ~/files 目录备份到 Turso（优先）+ GitHub Releases（备用回退）
+- 恢复时优先Turso，回退Releases
+- 保留文件权限（filter="tar"）
+- processes目录恢复后清空（由独立快照恢复最新版本）
+- 全链路日志
 """
 import io
 import os
@@ -24,12 +16,12 @@ import time
 import tarfile
 import sqlite3
 import threading
-import subprocess
 import datetime
 
 import config
 import log
 from core import storage, crypto, turso
+from core import status
 
 logger = log.setup_logger("persistence")
 
@@ -83,15 +75,14 @@ def backup_files_to_bytes():
     """把 ~/files 目录打包为 gz 字节流。用sudo避免权限不足。"""
     if not os.path.isdir(config.FILES_DIR):
         return None
-    t0 = time.time()
+    import subprocess
     result = subprocess.run(
         ["sudo", "tar", "czf", "-", "-C", os.path.expanduser("~"), "files"],
         capture_output=True, timeout=180)
-    elapsed = time.time() - t0
     if result.returncode != 0:
-        logger.error(f"[persistence] 文件打包失败({elapsed:.1f}s): {result.stderr.decode(errors='replace')[:200]}")
+        logger.error(f"[persistence] 文件打包失败: {result.stderr.decode(errors='replace')[:200]}")
         return None
-    logger.info(f"[persistence] 文件打包完成 ({len(result.stdout)} 字节, {elapsed:.1f}s)")
+    logger.info(f"[persistence] 文件打包完成 ({len(result.stdout)} 字节)")
     return result.stdout
 
 
@@ -101,23 +92,23 @@ def restore_files_from_bytes(data):
     """
     if not data:
         return False
-    t0 = time.time()
+    import subprocess
     tmp = os.path.join(os.path.expanduser("~"), ".files_restore.tar.gz")
     try:
         with open(tmp, "wb") as f:
             f.write(data)
+        # 用sudo解压（保留权限，包括root文件）
         result = subprocess.run(
             ["sudo", "tar", "xzf", tmp, "-C", os.path.expanduser("~")],
             capture_output=True, timeout=180)
-        elapsed = time.time() - t0
         if result.returncode != 0:
-            logger.error(f"[persistence] 文件解压失败({elapsed:.1f}s): {result.stderr.decode(errors='replace')[:200]}")
+            logger.error(f"[persistence] 文件解压失败: {result.stderr.decode(errors='replace')[:200]}")
             return False
         os.makedirs(config.FILES_DIR, exist_ok=True)
         # 清空 processes 目录（由独立快照恢复最新版本）
         subprocess.run(["sudo", "rm", "-rf", config.PROC_DIR], timeout=30)
         os.makedirs(config.PROC_DIR, exist_ok=True)
-        logger.info(f"[persistence] 文件恢复完成 ({len(data)} 字节, {elapsed:.1f}s, processes已清空)")
+        logger.info("[persistence] 文件恢复完成（processes目录已清空，由独立快照恢复）")
         return True
     except Exception as e:
         logger.error(f"[persistence] 文件恢复失败: {e}")
@@ -128,80 +119,11 @@ def restore_files_from_bytes(data):
         except Exception:
             pass
 
-
-# ==================== 版本号比较辅助 ====================
-def _get_turso_version(inst_id, data_type):
-    """获取Turso中数据的版本号。返回时间戳或None。"""
-    if not turso.is_available():
-        return None
-    try:
-        if data_type == "db":
-            return turso.get_blob_version(turso.inst_db_key(inst_id))
-        elif data_type == "files":
-            return turso.get_blob_version(turso.inst_files_key(inst_id))
-    except Exception as e:
-        logger.warning(f"[persistence] Turso版本号查询失败({data_type}): {e}")
-    return None
-
-
-def _get_releases_version(inst_id, data_type, asset_name, token, repo):
-    """获取Releases中数据的版本号。返回时间戳或None。
-    Releases没有版本号字段，用asset的updated_at时间戳。
-    """
-    try:
-        import requests as req
-        h = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
-        url = f"https://api.github.com/repos/{repo}/releases/tags/{config.BACKUP_TAG}"
-        r = req.get(url, headers=h, timeout=15)
-        if r.status_code != 200:
-            return None
-        for a in r.json().get("assets", []):
-            if a.get("name") == asset_name:
-                # GitHub的updated_at是ISO格式，转时间戳
-                from datetime import datetime as dt
-                ts_str = a.get("updated_at", "")
-                if ts_str:
-                    try:
-                        return dt.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
-                    except Exception:
-                        return None
-    except Exception as e:
-        logger.warning(f"[persistence] Releases版本号查询失败({data_type}): {e}")
-    return None
-
-
-def _choose_source(inst_id, data_type, asset_name, token, repo):
-    """比较Turso和Releases的版本号，返回 (source, version)。
-    source: "turso" / "releases" / None
-    version: 时间戳或None
-    """
-    turso_ver = _get_turso_version(inst_id, data_type)
-    releases_ver = _get_releases_version(inst_id, data_type, asset_name, token, repo)
-    logger.info(f"[persistence] 版本号比较({data_type}): Turso={turso_ver}, Releases={releases_ver}")
-    
-    if turso_ver and releases_ver:
-        if turso_ver >= releases_ver:
-            logger.info(f"[persistence] 选择Turso（版本号更大: {turso_ver} >= {releases_ver}）")
-            return "turso", turso_ver
-        else:
-            logger.info(f"[persistence] 选择Releases（版本号更大: {releases_ver} > {turso_ver}）")
-            return "releases", releases_ver
-    elif turso_ver:
-        logger.info(f"[persistence] 选择Turso（Releases无数据）")
-        return "turso", turso_ver
-    elif releases_ver:
-        logger.info(f"[persistence] 选择Releases（Turso无数据）")
-        return "releases", releases_ver
-    else:
-        logger.warning(f"[persistence] {data_type}: Turso和Releases都无数据")
-        return None, None
-
-
-# ==================== 备份/恢复（Turso优先 + Releases降级） ====================
+# ==================== 备份/恢复（Turso优先 + Releases备用） ====================
 def load_or_create(inst_cfg, token=None, repo=None):
     """
     恢复实例数据（数据库 + 文件）。
-    比较Turso和Releases版本号，选最新的恢复。
+    优先从 Turso 恢复，回退到 GitHub Releases。
     返回状态描述字符串。
     """
     tok = token or config.GH_TOKEN
@@ -212,24 +134,25 @@ def load_or_create(inst_cfg, token=None, repo=None):
     status_msg = "新建初始数据库"
 
     # === 恢复数据库 ===
-    db_source, db_ver = _choose_source(inst_id, "db", db_asset, tok, repo)
-    if db_source == "turso":
-        try:
+    db_restored = False
+    # 优先 Turso
+    try:
+        if turso.is_available():
             blob = turso.get_blob(turso.inst_db_key(inst_id))
             if blob:
-                raw = crypto.decrypt_bytes(blob)
-                with open(config.DB_FILE, "wb") as f:
-                    f.write(raw)
-                status_msg = f"从 Turso 恢复数据库（{len(raw)} 字节, ver={db_ver:.0f}）"
-                logger.info(status_msg)
-            else:
-                logger.warning("[persistence] Turso数据库为空，尝试Releases")
-                db_source = "releases"  # 降级
-        except Exception as e:
-            logger.warning(f"[persistence] Turso数据库恢复失败: {e}，尝试Releases")
-            db_source = "releases"  # 降级
-
-    if db_source == "releases":
+                try:
+                    raw = crypto.decrypt_bytes(blob)
+                    with open(config.DB_FILE, "wb") as f:
+                        f.write(raw)
+                    status_msg = f"从 Turso 恢复数据库（{len(raw)} 字节）"
+                    db_restored = True
+                    logger.info(status_msg)
+                except Exception as e:
+                    logger.warning(f"[persistence] Turso数据库解密失败: {e}")
+    except Exception as e:
+        logger.warning(f"[persistence] Turso数据库恢复失败: {e}")
+    # 回退 Releases
+    if not db_restored:
         try:
             blob = storage.download_asset_chunked(db_asset, token=tok, repo=repo)
             if blob:
@@ -247,34 +170,28 @@ def load_or_create(inst_cfg, token=None, repo=None):
             except Exception:
                 pass
 
-    if db_source is None:
-        create_new_db()
-        logger.info("[persistence] 无历史数据库，创建初始库")
-
     # === 恢复文件 ===
-    files_source, files_ver = _choose_source(inst_id, "files", files_asset, tok, repo)
     files_restored = False
-    if files_source == "turso":
-        try:
+    # 优先 Turso
+    try:
+        if turso.is_available():
             fdata = turso.get_blob(turso.inst_files_key(inst_id))
             if fdata:
-                raw = crypto.decrypt_bytes(fdata)
-                if restore_files_from_bytes(raw):
-                    files_restored = True
-                    logger.info(f"[persistence] 文件已从 Turso 恢复（{len(raw)} 字节, ver={files_ver:.0f}）")
-            else:
-                logger.warning("[persistence] Turso文件为空，尝试Releases")
-                files_source = "releases"
-        except Exception as e:
-            logger.warning(f"[persistence] Turso文件恢复失败: {e}，尝试Releases")
-            files_source = "releases"
-
-    if files_source == "releases" and not files_restored:
+                try:
+                    raw = crypto.decrypt_bytes(fdata)
+                    if restore_files_from_bytes(raw):
+                        files_restored = True
+                        logger.info(f"[persistence] 文件已从 Turso 恢复（{len(raw)} 字节）")
+                except Exception as e:
+                    logger.warning(f"[persistence] Turso文件解密失败: {e}")
+    except Exception as e:
+        logger.warning(f"[persistence] Turso文件恢复失败: {e}")
+    # 回退 Releases
+    if not files_restored:
         try:
             fdata = storage.download_asset_chunked(files_asset, token=tok, repo=repo)
             if fdata:
                 if restore_files_from_bytes(fdata):
-                    files_restored = True
                     logger.info(f"[persistence] 文件已从 Releases 恢复（{len(fdata)} 字节）")
         except Exception as e:
             logger.error(f"[persistence] 文件恢复异常: {e}")
@@ -284,12 +201,11 @@ def load_or_create(inst_cfg, token=None, repo=None):
 
 
 def backup_database(inst_cfg=None, token=None, repo=None):
-    """备份数据库。优先 Turso，失败降级 Releases。返回 (size, parts)。"""
+    """备份数据库。优先 Turso，回退 Releases。返回 (size, parts)。"""
     tok = token or config.GH_TOKEN
     repo = repo or config.REPO
     inst_id = inst_cfg.instance_id if inst_cfg else "global"
     db_asset = inst_cfg.asset_db if inst_cfg else config.ASSET_DB
-    t0 = time.time()
     try:
         with _db_lock:
             conn = _get_db()
@@ -300,26 +216,20 @@ def backup_database(inst_cfg=None, token=None, repo=None):
         with open(config.DB_FILE, "rb") as f:
             data = f.read()
         enc_data = crypto.encrypt_bytes(data)
-        elapsed_pack = time.time() - t0
-        logger.info(f"[backup] 数据库打包完成 ({len(data)} 字节, 加密后 {len(enc_data)} 字节, {elapsed_pack:.1f}s)")
-
         # 优先 Turso
         turso_ok = False
-        if turso.is_available():
-            try:
+        try:
+            if turso.is_available():
                 ok, ver = turso.put_blob(turso.inst_db_key(inst_id), enc_data)
                 if ok:
                     turso_ok = True
-                    elapsed = time.time() - t0
-                    logger.info(f"[backup] 数据库已存入 Turso ({len(data)} 字节, ver={ver:.0f}, {elapsed:.1f}s)")
-            except Exception as e:
-                logger.warning(f"[backup] Turso数据库备份失败: {e}")
-
-        # 降级 Releases
+                    logger.info(f"[backup] 数据库已存入 Turso ({len(data)} 字节)")
+        except Exception as e:
+            logger.warning(f"[backup] Turso数据库备份失败: {e}")
+        # 回退 Releases（upload_asset_chunked内部会加密，所以传原始数据）
         if not turso_ok:
             size, parts = storage.upload_asset_chunked(db_asset, data, token=tok, repo=repo)
-            elapsed = time.time() - t0
-            logger.info(f"[backup] 数据库已存入 Releases ({size} 字节, {parts} 分片, {elapsed:.1f}s)")
+            logger.info(f"[backup] 数据库已存入 Releases ({size} 字节, {parts} 分片)")
             return size, parts
         return len(data), 1
     except Exception as e:
@@ -328,35 +238,29 @@ def backup_database(inst_cfg=None, token=None, repo=None):
 
 
 def backup_files(inst_cfg=None, token=None, repo=None):
-    """备份 ~/files 目录。优先 Turso，失败降级 Releases。返回 (size, parts) 或 None。"""
+    """备份 ~/files 目录。优先 Turso，回退 Releases。返回 (size, parts) 或 None。"""
     tok = token or config.GH_TOKEN
     repo = repo or config.REPO
     inst_id = inst_cfg.instance_id if inst_cfg else "global"
     files_asset = inst_cfg.asset_files if inst_cfg else config.ASSET_FILES
-    t0 = time.time()
     data = backup_files_to_bytes()
     if not data:
         return None
     enc_data = crypto.encrypt_bytes(data)
-    logger.info(f"[backup] 文件打包完成 ({len(data)} 字节, 加密后 {len(enc_data)} 字节, {time.time()-t0:.1f}s)")
-
     # 优先 Turso
     turso_ok = False
-    if turso.is_available():
-        try:
+    try:
+        if turso.is_available():
             ok, ver = turso.put_blob(turso.inst_files_key(inst_id), enc_data)
             if ok:
                 turso_ok = True
-                elapsed = time.time() - t0
-                logger.info(f"[backup] 文件已存入 Turso ({len(data)} 字节, ver={ver:.0f}, {elapsed:.1f}s)")
-        except Exception as e:
-            logger.warning(f"[backup] Turso文件备份失败: {e}")
-
-    # 降级 Releases
+                logger.info(f"[backup] 文件已存入 Turso ({len(data)} 字节)")
+    except Exception as e:
+        logger.warning(f"[backup] Turso文件备份失败: {e}")
+    # 回退 Releases
     if not turso_ok:
         size, parts = storage.upload_asset_chunked(files_asset, data, token=tok, repo=repo)
-        elapsed = time.time() - t0
-        logger.info(f"[backup] 文件已存入 Releases ({size} 字节, {parts} 分片, {elapsed:.1f}s)")
+        logger.info(f"[backup] 文件已存入 Releases ({size} 字节, {parts} 分片)")
         return size, parts
     return len(data), 1
 
