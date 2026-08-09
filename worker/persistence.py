@@ -72,40 +72,52 @@ def create_new_db():
 
 # ==================== 文件打包 ====================
 def backup_files_to_bytes():
-    """把 ~/files 目录打包为 gz 字节流"""
+    """把 ~/files 目录打包为 gz 字节流。用sudo避免权限不足。"""
     if not os.path.isdir(config.FILES_DIR):
         return None
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        tar.add(config.FILES_DIR, arcname="files")
-    return buf.getvalue()
+    import subprocess
+    result = subprocess.run(
+        ["sudo", "tar", "czf", "-", "-C", os.path.expanduser("~"), "files"],
+        capture_output=True, timeout=180)
+    if result.returncode != 0:
+        logger.error(f"[persistence] 文件打包失败: {result.stderr.decode(errors='replace')[:200]}")
+        return None
+    logger.info(f"[persistence] 文件打包完成 ({len(result.stdout)} 字节)")
+    return result.stdout
 
 
 def restore_files_from_bytes(data):
-    """从字节流解包恢复到 home 目录。
-    保留文件权限（filter="tar"）。
+    """从字节流解包恢复到 home 目录。用sudo保留权限（包括root文件）。
     清空 processes 目录（由独立快照恢复最新版本）。
     """
     if not data:
         return False
+    import subprocess
+    tmp = os.path.join(os.path.expanduser("~"), ".files_restore.tar.gz")
     try:
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-            try:
-                tar.extractall(path=os.path.expanduser("~"), filter="tar")
-            except TypeError:
-                tar.extractall(path=os.path.expanduser("~"))
+        with open(tmp, "wb") as f:
+            f.write(data)
+        # 用sudo解压（保留权限，包括root文件）
+        result = subprocess.run(
+            ["sudo", "tar", "xzf", tmp, "-C", os.path.expanduser("~")],
+            capture_output=True, timeout=180)
+        if result.returncode != 0:
+            logger.error(f"[persistence] 文件解压失败: {result.stderr.decode(errors='replace')[:200]}")
+            return False
         os.makedirs(config.FILES_DIR, exist_ok=True)
-        # 关键：清除 processes 目录（避免旧版覆盖独立快照）
-        import shutil
-        if os.path.isdir(config.PROC_DIR):
-            shutil.rmtree(config.PROC_DIR, ignore_errors=True)
+        # 清空 processes 目录（由独立快照恢复最新版本）
+        subprocess.run(["sudo", "rm", "-rf", config.PROC_DIR], timeout=30)
         os.makedirs(config.PROC_DIR, exist_ok=True)
         logger.info("[persistence] 文件恢复完成（processes目录已清空，由独立快照恢复）")
         return True
     except Exception as e:
         logger.error(f"[persistence] 文件恢复失败: {e}")
         return False
-
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
 
 # ==================== 备份/恢复（Turso优先 + Releases备用） ====================
 def load_or_create(inst_cfg, token=None, repo=None):
