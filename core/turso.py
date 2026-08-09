@@ -138,9 +138,12 @@ def _execute_sql(account, sql, args=None, timeout=120):
             else:
                 formatted_args.append({"type": "text", "value": str(arg)})
 
+    stmt = {"sql": sql}
+    if formatted_args is not None:
+        stmt["args"] = formatted_args
     body = {
         "requests": [
-            {"type": "execute", "stmt": {"sql": sql, "args": formatted_args}},
+            {"type": "execute", "stmt": stmt},
             {"type": "close"},
         ]
     }
