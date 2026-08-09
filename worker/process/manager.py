@@ -130,6 +130,9 @@ class ProcessManager:
         with self._lock:
             for name in pconfig.load_manifest():
                 cfg = pconfig.load_proc_config(name)
+                if cfg is None:
+                    logger.warning(f"[process] {name} 无配置，跳过状态更新")
+                    continue
                 self.known[name] = {
                     "name": name, "status": "running", "config": cfg,
                     "started_at": time.time(),

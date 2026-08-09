@@ -144,6 +144,7 @@ def unpack_processes_tar(data):
 def snapshot(reason="periodic"):
     """
     扫描并备份所有用户进程，写入 manifest。
+    按cwd去重（每个项目目录只备份一次，用ghvps.json中的name作为key）。
     返回 (saved_count, processes_meta)。
     """
     from worker.process import scanner
@@ -154,14 +155,21 @@ def snapshot(reason="periodic"):
 
     saved = 0
     processes_meta = {}
+    seen_cwds = set()
     for info in procs:
+        # 按cwd去重（同一个项目目录下的多个进程只备份一次）
+        if info.cwd in seen_cwds:
+            continue
+        seen_cwds.add(info.cwd)
         try:
             cfg = pconfig.build_config(info)
             ok, size_mb, cfg = backup_process_files(cfg)
             if ok:
                 saved += 1
-                processes_meta[info.name] = {
-                    "name": info.name,
+                # 用cfg["name"]作为key（来自ghvps.json，与配置文件路径一致）
+                name = cfg.get("name", info.name)
+                processes_meta[name] = {
+                    "name": name,
                     "pid": info.pid,
                     "cmdline": info.cmdline_str(),
                     "cwd": info.cwd,
