@@ -13,6 +13,7 @@ import threading
 import config
 import log
 from core import utils
+from core import crypto, turso
 from worker.process import scanner
 from worker.process import config as pconfig
 from worker.process import backup as pbackup
@@ -56,27 +57,57 @@ class ProcessManager:
         return saved
 
     def _upload_snapshot(self):
-        """打包并上传进程快照到独立 asset"""
+        """打包并上传进程快照。优先 Turso，回退 Releases。"""
         if not self.inst_cfg:
             return
         from core import storage
         data = pbackup.pack_processes_tar()
         if not data:
             return
-        asset = f"inst-{self.inst_cfg.instance_id}.processes.tar.gz.enc"
-        size, parts = storage.upload_asset_chunked(asset, data)
-        logger.info(f"[process] 进程快照已独立上传 {size} 字节 ({parts} 分片)")
+        inst_id = self.inst_cfg.instance_id
+        enc_data = crypto.encrypt_bytes(data)
+        # 优先 Turso
+        turso_ok = False
+        try:
+            if turso.is_available():
+                ok, ver = turso.put_blob(turso.inst_processes_key(inst_id), enc_data)
+                if ok:
+                    turso_ok = True
+                    logger.info(f"[process] 进程快照已存入 Turso ({len(data)} 字节)")
+        except Exception as e:
+            logger.warning(f"[process] Turso快照上传失败: {e}")
+        # 回退 Releases
+        if not turso_ok:
+            asset = f"inst-{inst_id}.processes.tar.gz.enc"
+            size, parts = storage.upload_asset_chunked(asset, data)
+            logger.info(f"[process] 进程快照已存入 Releases ({size} 字节, {parts} 分片)")
 
     def _download_snapshot(self):
-        """从独立 asset 下载并解包进程快照"""
+        """下载并解包进程快照。优先 Turso，回退 Releases。"""
         if not self.inst_cfg:
             return
         from core import storage
-        asset = f"inst-{self.inst_cfg.instance_id}.processes.tar.gz.enc"
+        inst_id = self.inst_cfg.instance_id
+        # 优先 Turso
+        try:
+            if turso.is_available():
+                blob = turso.get_blob(turso.inst_processes_key(inst_id))
+                if blob:
+                    try:
+                        raw = crypto.decrypt_bytes(blob)
+                        pbackup.unpack_processes_tar(raw)
+                        logger.info(f"[process] 进程快照已从 Turso 恢复（{len(raw)} 字节）")
+                        return
+                    except Exception as e:
+                        logger.warning(f"[process] Turso快照解密失败: {e}")
+        except Exception as e:
+            logger.warning(f"[process] Turso快照下载失败: {e}")
+        # 回退 Releases
+        asset = f"inst-{inst_id}.processes.tar.gz.enc"
         data = storage.download_asset_chunked(asset)
         if data:
             pbackup.unpack_processes_tar(data)
-            logger.info(f"[process] 独立进程快照已恢复（{len(data)} 字节）")
+            logger.info(f"[process] 进程快照已从 Releases 恢复（{len(data)} 字节）")
 
     def final_snapshot(self):
         """销毁前最终快照"""
