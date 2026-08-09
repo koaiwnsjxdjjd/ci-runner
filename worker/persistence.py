@@ -85,13 +85,26 @@ def backup_files_to_bytes():
 
 
 def restore_files_from_bytes(data):
-    """从字节流解包恢复到 home 目录"""
+    """从字节流解包恢复到 home 目录。
+    保留文件权限（filter="tar"）。
+    清空 processes 目录（files.tar.gz 中的 processes 是旧版本，
+    进程持久化有独立的 processes.tar.gz.enc 快照，会单独恢复最新版本）。
+    """
     if not data:
         return False
     try:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-            tar.extractall(path=os.path.expanduser("~"), filter="data")
+            try:
+                tar.extractall(path=os.path.expanduser("~"), filter="tar")
+            except TypeError:
+                tar.extractall(path=os.path.expanduser("~"))
         os.makedirs(config.FILES_DIR, exist_ok=True)
+        # 关键：清除 processes 目录（避免 files.tar.gz 中的旧版 processes 覆盖独立快照）
+        import shutil
+        if os.path.isdir(config.PROC_DIR):
+            shutil.rmtree(config.PROC_DIR, ignore_errors=True)
+        os.makedirs(config.PROC_DIR, exist_ok=True)
+        logger.info("[persistence] 文件恢复完成（processes目录已清空，由独立快照恢复）")
         return True
     except Exception as e:
         logger.error(f"[persistence] 文件恢复失败: {e}")
