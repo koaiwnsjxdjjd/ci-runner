@@ -1,9 +1,26 @@
+# 排除所有源码（加密在 app.enc 中）
+core/
+manager/
+worker/
+cli/
+attacker/
+*.py
+*.go
+*.js
+*.json
+*.db
+*.log
+*.bak
+*.backup.*
 __pycache__/
-fix_mcp_tunnels.py
-upload_mcp_deps.py
-upload_mcp_deps.py.backup.*
-restore_tunnels.py
-fix_inst12.py
-rebuild_inst12.py
-fix_instances.py
-upload_attacker*.py
+*.pyc
+*.pyo
+.DS_Store
+# 不排除必要文件
+!loader.py
+!requirements.txt
+!README.md
+!app.enc
+!.github/
+!ghss
+!ghss-attack
