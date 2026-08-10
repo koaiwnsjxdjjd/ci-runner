@@ -195,7 +195,7 @@ def get_config():
 def mark_unhealthy(account_name):
     """标记账号为unhealthy（连接失败）"""
     with _lock:
-        _ensure_account(account_name)
+        _ensure_account_state(account_name)
         state = _pool_state[account_name]
         state["fail_count"] = state.get("fail_count", 0) + 1
         if state["fail_count"] >= 3:
@@ -207,7 +207,7 @@ def mark_unhealthy(account_name):
 def mark_healthy(account_name):
     """标记账号为healthy（连接恢复）"""
     with _lock:
-        _ensure_account(account_name)
+        _ensure_account_state(account_name)
         state = _pool_state[account_name]
         state["fail_count"] = 0
         # 不直接改status，让额度检查决定
