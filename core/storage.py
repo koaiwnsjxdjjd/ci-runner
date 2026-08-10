@@ -112,19 +112,47 @@ def upload_asset(name, data_bytes, token=None, repo=None):
         ghapi.gh_request("DELETE",
                          f"{ghapi.API_BASE}/repos/{repo}/releases/assets/{old['id']}",
                          token=tok, timeout=30)
-    # 上传新资产
-    url = f"{ghapi.UPLOAD_BASE}/repos/{repo}/releases/{rel_id}/assets?name={name}"
-    status, _ = ghapi.gh_request(
-        "POST", url, token=tok, data=data_bytes,
-        headers={"Content-Type": "application/octet-stream"}, timeout=180)
-    if status in (200, 201):
-        logger.info(f"[storage] 上传 {name} OK ({len(data_bytes)} bytes) -> {repo}")
-    else:
+    # 上传新资产（404时清除缓存重试一次）
+    for upload_attempt in range(2):
+        url = f"{ghapi.UPLOAD_BASE}/repos/{repo}/releases/{rel_id}/assets?name={name}"
+        status, _ = ghapi.gh_request(
+            "POST", url, token=tok, data=data_bytes,
+            headers={"Content-Type": "application/octet-stream"}, timeout=180)
+        if status in (200, 201):
+            logger.info(f"[storage] 上传 {name} OK ({len(data_bytes)} bytes) -> {repo}")
+            return len(data_bytes), status
+        if status == 404 and upload_attempt == 0:
+            # release可能被删除或重建，清除缓存重试
+            logger.warning(f"[storage] 上传 {name} 404, 清除release缓存重试")
+            with _release_lock:
+                cache_key = f"{tok}:{repo}"
+                _release_cache.pop(cache_key, None)
+            # 重新获取release ID
+            rel = get_release(token=tok, repo=repo)
+            if rel:
+                with _release_lock:
+                    _release_cache[f"{tok}:{repo}"] = rel["id"]
+                rel_id = rel["id"]
+            else:
+                # release不存在，创建新的
+                url2 = f"{ghapi.API_BASE}/repos/{repo}/releases"
+                status2, d2 = ghapi.gh_request("POST", url2, token=tok,
+                    data={"tag_name": config.BACKUP_TAG, "name": "加密备份",
+                          "body": "AES-256-GCM 加密备份", "draft": False, "prerelease": False},
+                    timeout=30)
+                if status2 in (200, 201):
+                    rel_id = d2.get("id")
+                    with _release_lock:
+                        _release_cache[f"{tok}:{repo}"] = rel_id
+                else:
+                    logger.error(f"[storage] 创建release失败: {status2}")
+                    break
+            continue
+        break
+    if status not in (200, 201):
         logger.error(f"[storage] 上传 {name} 失败({status}) -> {repo}")
-    # 上传失败：不恢复旧数据（避免旧版本覆盖新版本）
-    # 下次快照会重新上传新数据
-    if status not in (200, 201) and old_backup:
-        logger.warning(f"[storage] 上传 {name} 失败({status})，下次快照重试")
+        if old_backup:
+            logger.warning(f"[storage] 上传 {name} 失败，下次快照重试")
     return len(data_bytes), status
 
 
