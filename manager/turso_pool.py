@@ -133,7 +133,7 @@ def assign_account(inst_id):
         best_remaining = 0
         for acct in accounts:
             name = acct.get("name", "?")
-            _ensure_account(name)
+            _ensure_account_state(name)
             state = _pool_state[name]
             if state["status"] in ("full", "unhealthy"):
                 logger.info(f"[turso_pool] 跳过账号 {name} (status={state['status']})")
@@ -156,7 +156,7 @@ def get_status():
     result = []
     for acct in accounts:
         name = acct.get("name", "?")
-        _ensure_account(name)
+        _ensure_account_state(name)
         state = _pool_state.get(name, {})
         total = state.get("total_size", 0)
         usage_pct = total / TURSO_QUOTA * 100
